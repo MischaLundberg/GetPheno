@@ -3,7 +3,7 @@
 
 
 # Getting Started (common)
-In order to download `ExDEP_Plotting`, you should clone this repository via the commands
+In order to download `GetPheno`, you should clone this repository via the commands
 ```  
 git clone https://github.com/MischaLundberg/GetPheno
 cd GetPheno

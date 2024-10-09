@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import os 
+import re
 import argparse 
 import sys
 import psutil
@@ -36,7 +37,6 @@ BP_MDD_Codes = ["ICD10:F32", "ICD10:F32.0", "ICD10:F32.1", "ICD10:F32.2", "ICD10
 "ICD9-CM:296.46", "ICD9-CM:298.0", "ICD9-CM:300.4", "ICD8:296.2", "ICD8:298.0", "ICD8:300.4"]
 
 # Intellectual Disability / Mental retardation (ID)
-#ID_Codes = ["F70", "F70.0", "F70.1", "F70.8", "F70.9", "F71", "F71.0", "F71.1", "F71.8", "F71.9", "F72", "F72.0", "F72.1", "F72.8", "F72.9", "F73", "F73.0", "F73.1", "F73.8", "F73.9", "F74", "F74.0", "F74.1", "F74.8", "F74.9", "F75", "F75.0", "F75.1", "F75.8", "F75.9", "F76", "F76.0", "F76.1", "F76.8", "F76.9", "F77", "F77.0", "F77.1", "F77.8", "F77.9", "F78", "F78.0", "F78.1", "F78.8", "F78.9", "F79", "F79.0", "F79.1", "F79.8", "F79.9", 310, 310.0, 310.1, 310.2, 310.3, 310.4, 310.5, 310.7, 310.8, 310.9, 311, 311.0, 311.1, 311.2, 311.3, 311.4, 311.5, 311.7, 311.8, 311.9, 312, 312.0, 312.1, 312.2, 312.3, 312.4, 312.5, 312.7, 312.8, 312.9, 313, 313.0, 313.1, 313.2, 313.3, 313.4, 313.5, 313.7, 313.8, 313.9, 314, 314.0, 314.1, 314.2, 314.3, 314.4, 314.5, 314.7, 314.8, 314.9, 315, 315.0, 315.1, 315.2, 315.3, 315.4, 315.5, 315.7, 315.8, 315.9, 310.00, 310.10, 310.20, 310.30, 310.40, 310.50, 310.70, 310.80, 310.90, 311.00, 311.10, 311.20, 311.30, 311.40, 311.50, 311.70, 311.80, 311.90, 312.00, 312.10, 312.20, 312.30, 312.40, 312.50, 312.70, 312.80, 312.90, 313.00, 313.10, 313.20, 313.30, 313.40, 313.50, 313.70, 313.80, 313.90, 314.00, 314.10, 314.20, 314.30, 314.40, 314.50, 314.70, 314.80, 314.90, 315.00, 315.10, 315.20, 315.30, 315.40, 315.50, 315.70, 315.80, 315.90]
 ID_Codes = ["ICD10:F70", "ICD10:F70.0", "ICD10:F70.1", "ICD10:F70.8", "ICD10:F70.9", "ICD10:F71", "ICD10:F71.0", "ICD10:F71.1", 
     "ICD10:F71.8", "ICD10:F71.9", "ICD10:F72", "ICD10:F72.0", "ICD10:F72.1", "ICD10:F72.8", "ICD10:F72.9", "ICD10:F73", "ICD10:F73.0", 
     "ICD10:F73.1", "ICD10:F73.8", "ICD10:F73.9", "ICD10:F74", "ICD10:F74.0", "ICD10:F74.1", "ICD10:F74.8", "ICD10:F74.9", "ICD10:F75", 
@@ -59,7 +59,6 @@ ID_Codes = ["ICD10:F70", "ICD10:F70.0", "ICD10:F70.1", "ICD10:F70.8", "ICD10:F70
     ]
 
 # Schizophrenia (SCZ)
-#SCZ_Codes = ["F20", "F20.0", "F20.1", "F20.2", "F20.3", "F20.5", "F20.6", "F20.8", "F20.9", 295, 295.0, 295.1, 295.2, 295.3, 295.5, 295.6, 295.8, 295.9, 295.00, 295.10, 295.20, 295.30, 295.50, 295.60, 295.80, 295.90]
 SCZ_Codes =  ["ICD10:F20", "ICD10:F20.0", "ICD10:F20.1", "ICD10:F20.2", "ICD10:F20.3", "ICD10:F20.5", "ICD10:F20.6", "ICD10:F20.8", "ICD10:F20.9",
     "ICD10-CM:F20", "ICD10-CM:F20.0", "ICD10-CM:F20.1", "ICD10-CM:F20.2", "ICD10-CM:F20.3", "ICD10-CM:F20.5", "ICD10-CM:F20.6", "ICD10-CM:F20.8", 
     "ICD10-CM:F20.9", "ICD9:295", "ICD9:295.0", "ICD9:295.00", "ICD9:295.01", "ICD9:295.02", "ICD9:295.03", "ICD9:295.04", "ICD9:295.05", 
@@ -83,7 +82,6 @@ SCZ_Codes =  ["ICD10:F20", "ICD10:F20.0", "ICD10:F20.1", "ICD10:F20.2", "ICD10:F
     "ICD8:295.8", "ICD8:295.89", "ICD8:295.9", "ICD8:295.99"]
 
 # Bipolar Disorder (BPD)
-#BPD_Codes = ["F30", "F30.0", "F30.1", "F30.2", "F30.8", "F30.9", "F31", "F31.0", "F31.1", "F31.2", "F31.3", "F31.4", "F31.5", "F31.6", "F31.7", "F31.8", "F31.9", 296.1, 296.3, 296.8, 296.9, 296.10, 296.30, 296.80, 296.90, 298.1, 298.10]
 BPD_Codes = ["ICD10:F30", "ICD10:F30.0", "ICD10:F30.1", "ICD10:F30.2", "ICD10:F30.8", "ICD10:F30.9", "ICD10:F31", "ICD10:F31.0", "ICD10:F31.1", 
     "ICD10:F31.2", "ICD10:F31.3", "ICD10:F31.4", "ICD10:F31.5", "ICD10:F31.6", "ICD10:F31.7", "ICD10:F31.8", "ICD10:F31.9", "ICD10-CM:F30", 
     "ICD10-CM:F30.0", "ICD10-CM:F30.1", "ICD10-CM:F30.2", "ICD10-CM:F30.8", "ICD10-CM:F30.9", "ICD10-CM:F31", "ICD10-CM:F31.0", "ICD10-CM:F31.1", 
@@ -102,7 +100,6 @@ BPD_Codes = ["ICD10:F30", "ICD10:F30.0", "ICD10:F30.1", "ICD10:F30.2", "ICD10:F3
     "ICD8:296.3", "ICD8:296.39", "ICD8:296.8", "ICD8:296.89", "ICD8:296.9", "ICD8:296.99"]
 
 # Dementia (DEM)
-#DEM_Codes = ["F00", "F00.0", "F00.1", "F00.2", "F00.9", "F01.1", "F01.2", "F01.3", "F01.8", "F01.9", "F02.0", "F02.1", "F02.2", "F02.3", "F02.4", "F02.8", "F03", 290, 290.0, 290.1, 293.0, 293.2, 293.4, 293.9, 294.8, 290.00, 290.10, 293.00, 293.20, 293.40, 293.90, 294.80]
 DEM_Codes = ["ICD10:F00", "ICD10:F00.0", "ICD10:F00.1", "ICD10:F00.2", "ICD10:F00.9", "ICD10:F01.1", "ICD10:F01.2", "ICD10:F01.3", "ICD10:F01.8", 
     "ICD10:F01.9", "ICD10:F02.0", "ICD10:F02.1", "ICD10:F02.2", "ICD10:F02.3", "ICD10:F02.4", "ICD10:F02.8", "ICD10:F03", "ICD10-CM:F00", "ICD10-CM:F00.0", 
     "ICD10-CM:F00.1", "ICD10-CM:F00.2", "ICD10-CM:F00.9", "ICD10-CM:F01.1", "ICD10-CM:F01.2", "ICD10-CM:F01.3", "ICD10-CM:F01.8", "ICD10-CM:F01.9", 
@@ -111,12 +108,10 @@ DEM_Codes = ["ICD10:F00", "ICD10:F00.0", "ICD10:F00.1", "ICD10:F00.2", "ICD10:F0
     "ICD9-CM:290.8", "ICD9-CM:290.9", "ICD9-CM:294.1", "ICD8:290", "ICD8:290.0", "ICD8:290.1", "ICD8:293.0", "ICD8:293.2", "ICD8:293.4", "ICD8:293.9", "ICD8:294.8"]
 
 # Alcohol use Disorder (AUD)
-#AUD_Codes = ["F10.2", 303.2, 303.20]
 AUD_Codes = ["ICD10:F10.2", "ICD10-CM:F10.2", "ICD9:303", "ICD9:303.0", "ICD9:303.1", "ICD9:303.2", "ICD9:303.9",
     "ICD9-CM:303", "ICD9-CM:303.0", "ICD9-CM:303.1", "ICD9-CM:303.2", "ICD9-CM:303.9", "ICD8:303.2"]
 
 # Drug use Disorder (DUD)
-#DUD_Codes = ["F11.2", "F12.2", "F13.2", "F14.2", "F15.2", "F16.2", "F18.2", "F19.2", 304.0, 304.09, 304.19, 304.5, 304.59, 304.2, 304.29, 304.39, 304.4, 304.49, 304.69, 304.7, 304.79, 304.89, 304.99, 304.8, 304.00, 304.09, 304.19, 304.50, 304.59, 304.20, 304.29, 304.39, 304.40, 304.49, 304.69, 304.70, 304.79, 304.89, 304.99, 304.80]
 DUD_Codes = ["ICD10:F11.2", "ICD10:F12.2", "ICD10:F13.2", "ICD10:F14.2", "ICD10:F15.2", "ICD10:F16.2", "ICD10:F18.2", "ICD10:F19.2", "ICD10-CM:F11.2", 
     "ICD10-CM:F12.2", "ICD10-CM:F13.2", "ICD10-CM:F14.2", "ICD10-CM:F15.2", "ICD10-CM:F16.2", "ICD10-CM:F18.2", "ICD10-CM:F19.2", "ICD9:304.0", 
     "ICD9:304.3", "ICD9:304.1", "ICD9:304.2", "ICD9:304.4", "ICD9:304.5", "ICD9:304.6", "ICD9:304.7", "ICD9-CM:304.0", "ICD9-CM:304.3", "ICD9-CM:304.1", 
@@ -125,12 +120,10 @@ DUD_Codes = ["ICD10:F11.2", "ICD10:F12.2", "ICD10:F13.2", "ICD10:F14.2", "ICD10:
     "ICD8:304.99", "ICD8:304.8"]
 
 # Mild cognitive Impairment (MCI)
-#MCI_Codes = ["G31.84", "F06.7"]
 MCI_Codes = ["ICD10:G31.84", "ICD10:F06.7", "ICD10-CM:G31.84", "ICD10-CM:F06.7", "ICD9:331.83", "ICD9:310.1",
     "ICD9-CM:331.83", "ICD9-CM:310.1"]
 
 # Concurrent terminal illness (CTI)
-#CTI_Codes = ["C79.9", "C77.9", "G12.2", "I50.9", "J44.9", "J44.0", "J44.1", "K74.6", 198.99, 196.99, 348.09, 348.19, 348.20,248.29, 248.99, 427.09, 571.92, 571.99]
 CTI_Codes = ["ICD10:C25", "ICD10:C25.0", "ICD10:C25.1", "ICD10:C25.2", "ICD10:C25.3", "ICD10:C25.4", "ICD10:C25.7", "ICD10:C25.8", 
     "ICD10:C25.9", "ICD10:C22", "ICD10:C22.0", "ICD10:C22.1", "ICD10:C22.2", "ICD10:C22.3", "ICD10:C22.4", "ICD10:C22.7", "ICD10:C22.8", 
     "ICD10:C22.9", "ICD10:C34", "ICD10:C34.0", "ICD10:C34.1", "ICD10:C34.2", "ICD10:C34.3", "ICD10:C34.8", "ICD10:C34.9", "ICD10:C71", 
@@ -224,21 +217,18 @@ GAD_Codes = ["ICD10:F41.1", "ICD10-CM:F41.1"]
 PD_Codes = ["ICD10:F41.0", "ICD10-CM:F41.0"]
 
 # Phobias
-#Phobias_Codes = ["F40" , "F40.0", "F40.1", "F40.2", "F40.8", "F40.9", 300.2, 300.0, 300.20, 300.00]
 Phobias_Codes = ["ICD10:F40", "ICD10:F40.0", "ICD10:F40.1", "ICD10:F40.2", "ICD10:F40.8", "ICD10:F40.9",
     "ICD10-CM:F40", "ICD10-CM:F40.0", "ICD10-CM:F40.1", "ICD10-CM:F40.2", "ICD10-CM:F40.8", "ICD10-CM:F40.9",
     "ICD9:300.2", "ICD9:300.0", "ICD9-CM:300.2", "ICD9-CM:300.0", "ICD8:300.2", "ICD8:300.0"]
 # Anxiety Disorder (ANX)
 ANX_Codes = ["F40", "F40.0", "F40.1", "F40.2", "F40.8", "F40.9", "F41", "F41.0", "F41.1", "F41.1", "F41.3", "F41.8", "F41.9", 300.0, 300.2, 300.00, 300.20]
 
-# ADHD 
-#ADHD_Codes = ["F90", "F90.0", "F90.1", "F90.8", "F90.9", 380.01]#DONT DO EXACT MAPPING!
+# ADHD
 ADHD_Codes = ["ICD10:F90", "ICD10:F90.0", "ICD10:F90.1", "ICD10:F90.2", "ICD10:F90.8", "ICD10:F90.9",
     "ICD10-CM:F90", "ICD10-CM:F90.0", "ICD10-CM:F90.1", "ICD10-CM:F90.2", "ICD10-CM:F90.8", "ICD10-CM:F90.9",
     "ICD9:314", "ICD9:314.0", "ICD9:314.00", "ICD9:314.01", "ICD9:314.1", "ICD9-CM:314", "ICD9-CM:314.0", "ICD9-CM:314.00", 
     "ICD9-CM:314.01", "ICD9-CM:314.1", "ICD8:308.01", "ICD8:308.02"]
 # Autism (ASD)
-#ASD_Codes = ["F84.0", "F84.1", "F84.5", "F84.9", 299.00, 299.01, 299.02, 299.03]
 ASD_Codes = ["ICD10:F84.0", "ICD10:F84.1", "ICD10:F84.5", "ICD10:F84.9", 
     "ICD10-CM:F84.0", "ICD10-CM:F84.1", "ICD10-CM:F84.5", "ICD10-CM:F84.9",
     "ICD9:299.0", "ICD9:299.00", "ICD9:299.01", "ICD9:299.1", "ICD9:299.10", "ICD9:299.11", "ICD9:299.8", "ICD9:299.80", 
@@ -293,21 +283,6 @@ CP_Codes = ["ICD10:M79.60", "ICD10:M54.5", "ICD10:M54.2", "ICD10:G89.0", "ICD10:
     "ICD9-CM:715.5", "ICD9-CM:715.6", "ICD9-CM:715.7", "ICD9-CM:715.8", "ICD9-CM:715.9", "ICD9-CM:337.0", "ICD9-CM:337.1", "ICD9-CM:337.2", 
     "ICD9-CM:337.3", "ICD9-CM:337.4", "ICD9-CM:337.5", "ICD9-CM:337.6", "ICD9-CM:337.7", "ICD9-CM:337.8", "ICD9-CM:337.9", "ICD9-CM:337.22", 
     "ICD9-CM:053.12", "ICD9-CM:282.60", "ICD9-CM:340", "ICD9-CM:714.0"]    
-#CP_Codes = [338.2, 724.2, 723.1, 338.3, 338.4, 338.8, 714.0, 714.1, 714.2, 714.3, 714.4, 714.5, 
-#    714.6, 714.7, 714.8, 714.9, 715.0, 715.1, 715.2, 715.3, 715.4, 715.5, 715.6, 715.7, 
-#    715.8, 715.9, 337.0, 337.1, 337.2, 337.3, 337.4, 337.5, 337.6, 337.7, 337.8, 337.9, 
-#    337.22, 053.12, 282.60, 340, 714.0,
-#    338.20, 724.20, 723.10, 338.30, 338.40, 338.80, 714.00, 714.10, 714.20, 714.30, 714.40, 714.50, 
-#    714.60, 714.70, 714.80, 714.90, 715.00, 715.10, 715.20, 715.30, 715.40, 715.50, 715.60, 715.70, 
-#    715.80, 715.90, 337.00, 337.10, 337.20, 337.30, 337.40, 337.50, 337.60, 337.70, 337.80, 337.90, 340.00, 714.00,
-#    "M79.60", "M54.5", "M54.2", "G89.0", "G89.4", "G89.8", "G89.29", "G89.21", "M06.9", 
-#    "M15", "M15.0", "M15.1", "M15.2", "M15.3", "M15.4", "M15.8", "M15.9", "M16", "M16.0", 
-#    "M16.1", "M16.2", "M16.3", "M16.4", "M16.5", "M16.6", "M16.7", "M16.9", "M17", "M17.0",
-#    "M17.1", "M17.2", "M17.3", "M17.4", "M17.5", "M17.9", "M18", "M18.0", "M18.1", "M18.2", 
-#    "M18.3", "M18.4", "M18.5", "M18.9", "M19", "M19.0", "M19.1", "M19.2", "M19.8", "M19.9", 
-#    "G90.50", "G90.511", "G53.0", "D57.81", "G35", "M45", "M79.7", "M05", "M05.0", "M05.1", 
-#    "M05.2", "M05.3", "M05.8", "M05.9", "M06", "M06.0", "M06.1", "M06.2", "M06.3", "M06.4", 
-#    "M06.8", "M06.9", "R52.2", "R52.1"]
 
 # Ken's Pain (22.12.2023 via E-Mail)
 Ken_Pain_Codes = ["R52", "M50", "M51", "M53", "M54"]
@@ -343,16 +318,9 @@ Sleep_Disorder_Codes = ["ICD10:F51.0", "ICD10:F51.00", "ICD10:F51.05", "ICD10:F5
     "ICD9-CM:770.81", "ICD9-CM:780.57", "ICD9-CM:780.51", "ICD9-CM:327.21", "ICD9-CM:327.29", "ICD9-CM:327.20",
     "ICD8:306.49", "ICD8:306.49", "ICD8:347.00", "ICD8:347.01", "ICD8:347.09", "ICD8:347.10"]
 
-#LOAD_Codes = ["ICD10:G30.1"]
-#EOAD_Codes = ["ICD10:G30.0"]
 AD_Codes = ["ICD10:G30.1", "ICD10:F00.1", "ICD10:F00.2", "ICD10:G30.8", "ICD10:G30.9", "ICD10:F00.9",
     "ICD10-CM:G30.1", "ICD10-CM:F00.1", "ICD10-CM:G30.8", "ICD10-CM:G30.9", "ICD10-CM:F00.9",
     "ICD9:331.0", "ICD9-CM:331.0", "ICD8:290.1", "ICD8:290.10"]
-#WideAD_Codes = ["ICD10:F00", "ICD10:F00.0", "ICD10:F00.1", "ICD10:F00.2", "ICD10:F00.9", "ICD10:F01",
-#    "ICD10:F01.1", "ICD10:F01.2", "ICD10:F01.3", "ICD10:F01.8", "ICD10:F01.9", "ICD10:F02", "ICD10:F02.0", 
-#    "ICD10:F02.1", "ICD10:F02.2", "ICD10:F02.3", "ICD10:F02.4", "ICD10:F02.8","ICD10:F03", "ICD10:F05.1",
-#    "ICD10:F05.9", "ICD10:F06.0", "ICD10:F06.7", "ICD10:F10.7", "ICD10:G30", "ICD10:G30.8", "ICD10:G30.9", 
-#    "ICD10:G30.0", "ICD10:G30.1", "ICD10:G31.0", "ICD10:G31.1", "ICD10:G31.8"]
 
 Pain_Codes = ["ICD10:R52", "ICD10:R52.0", "ICD10:R52.1", "ICD10:R52.2", "ICD10:R52.9", "ICD10:M50", "ICD10:M50.0", "ICD10:M50.1", 
     "ICD10:M50.2", "ICD10:M50.3", "ICD10:M50.8", "ICD10:M50.9", "ICD10:M51", "ICD10:M51.0", "ICD10:M51.1", "ICD10:M51.2", "ICD10:M51.3", 
@@ -535,14 +503,6 @@ Other_Mental_Codes = ["ICD10:F00", "ICD10:F01", "ICD10:F02", "ICD10:F03", "ICD10
     "ICD8:306.4", "ICD8:306.5", "ICD8:306.6", "ICD8:306.7", "ICD8:306.8", "ICD8:306.9", "ICD8:307", "ICD8:308", "ICD8:308.1", "ICD8:308.2", "ICD8:308.4", "ICD8:309", "ICD8:309.2", "ICD8:309.9", "ICD8:311", 
     "ICD8:312", "ICD8:313", "ICD8:314", "ICD8:315", "ICD8:315.1", "ICD8:315.2", "ICD8:315.3", "ICD8:315.4", "ICD8:315.5", "ICD8:315.7", "ICD8:315.8", "ICD8:315.9", "ICD8:342", "ICD8:390.1", "ICD8:393"]
 
-Psychotic_Grant_Codes = ["F32.2", "F33.3"]
-
-NonPsychotic_Grant_Codes = ["F32.0", "F32.1", "F32.3", "F32.8", "F32.9", "F33.0", "F33.1", "F33.2", "F33.4", "F33.8", "F33.9", 296.2, 298.0, 300.4]
-
-AUD_Grant_Codes = ["E24.4", "G31.2", "G62.1", "G72.1", "I42.6", "K29.2", "K70", "K85.2", "K86.0", "O35.4", "T51", "F10", 291.09, 291.19, 291.29, 291.39, 291.49, 291.59, 291.69, 291.79, 291.89, 291.99, 303.09, 303.19, 303.29, 303.39, 303.49, 303.59, 303.69, 303.79, 303.89, 303.99, 303.20, 303.38, 303.90]
-
-DUD_Grant_Codes = ["F11", "F12", "F13", "F14", "F15", "F16", "F18", "F19", 304]
-
 
 # Function to generate random alphanumeric string
 def generate_cpr_enc():
@@ -622,6 +582,29 @@ def generate_test_dataset(odir):
     # Save the DataFrame to a CSV file
     test_mdd_pheno_df.to_csv("./sample_pheno_request.txt", index=False)
 
+def split_and_format(input_str):
+    # Use regex to split the string into letter, integer, and decimal parts
+    match = re.match(r"([A-Za-z]+)(\d+)(?:\.(\d+))?", input_str)
+    
+    if match:
+        string_part = match.group(1)
+        integer_part = match.group(2)
+        decimal_part = match.group(3)
+        
+        # Combine integer and decimal parts
+        combined_number = integer_part + decimal_part
+        
+        # Ensure the combined number is 4 digits by adding trailing zeros if necessary
+        combined_number = combined_number.ljust(4, '0')
+        
+        # Reconstruct the final string
+        final_string = string_part + combined_number
+        #final_string = combined_number
+        
+        #return string_part, integer_part, decimal_part, final_string
+        return final_string
+    else:
+        raise ValueError("Input string format is invalid: (",type(input_str),") ", input_str)
 
 def add_items_to_comma_list(old_comma_list, new_list_item):
     temp_list = old_comma_list.apply(lambda x: [item for item in x.split(',') if item.strip() != ''])
@@ -797,9 +780,15 @@ def update_icd_coding(data, dst=False, dbdschb=False, ipsych=False, eM=False, sk
                 elif isinstance(entry, str) and not entry.startswith('ICD10:') and not entry.startswith('ICD10:D') and not entry.startswith('ICD10-CM:'):
                     entry = 'D' + entry.upper()
                 elif isinstance(entry, str) and entry.startswith('ICD10:') and not entry.startswith('ICD10:D') and not entry.startswith('ICD10-CM:'):
-                    entry = 'D' + entry.replace('ICD10:', '', 1).upper()
-                elif isinstance(entry, str) and not entry.startswith('ICD10:') and entry.startswith('ICD10:D') and not entry.startswith('ICD10-CM:'):
+                    entry = str(entry)
                     entry = entry.replace('ICD10:', '', 1).upper()
+                    entry = split_and_format(entry)
+                    entry = 'D' + entry
+                elif isinstance(entry, str) and not entry.startswith('ICD10:') and entry.startswith('ICD10:D') and not entry.startswith('ICD10-CM:'):
+                    entry = str(entry)
+                    entry = entry.replace('ICD10:', '', 1).upper()
+                    entry = split_and_format(entry)
+                    entry = 'D' + entry
                 elif isinstance(entry, (int, float)) and str(entry).isdigit() and not entry.startswith('ICD10-CM:') and not entry.startswith('ICD9-CM:'):
                     updateICD8 = True
                     entry_str = str(entry)
@@ -1969,7 +1958,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         if (lpr_file == ''):
             stam_file = "E://Data/rawdata/703935/Population/stam2016h.dta"
             stam_cols_to_read_as_date = ['fdato']#,'statd','fdato_m','fdato_f','statd_m','statd_f']
-            lpr_file = "E://Data/rawdata/703935/HEALTH/psyk_adm2016.dta,E://Data/rawdata/703935/HEALTH/lpr_adm2016b.dta"
+            lpr_file = "E://Data/rawdata/703935/Population/psyk_adm2016.dta,E://Data/rawdata/703935/Population/lpr_adm2016b.dta" #"E://Data/rawdata/703935/HEALTH/psyk_adm2016.dta,E://Data/rawdata/703935/HEALTH/lpr_adm2016b.dta"
             addition_information_file = "E://Data/rawdata/703935/Population/ipsych2015design_v2.dta"  #"E://Data/rawdata/703935/Population/stamdata2016.dta"
             diagnostic_col="c_adiag"
             pheno_requestcol = "diagnosis"
@@ -2539,11 +2528,10 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                         df = pd.read_csv(additionfile, sep=fsep, dtype=str)
                     df4 = pd.concat([df4, df], ignore_index=True, sort=False)
                     del(df)
-                del(additionfile)
                 del(file_paths)
             else:
                 if dta_input:
-                        df4 = pd.read_stata(additionfile)
+                        df4 = pd.read_stata(addition_information_file)
                 else:
                     df4 = pd.read_csv(addition_information_file, sep=fsep, dtype=str)
             if (birthdatecol in df4.columns and birthdatecol != "birthdate"):
@@ -2749,8 +2737,10 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             #    values_to_match = set(output_list)
             if (type(in_pheno_codes) == list):
                 values_to_match = in_pheno_codes
-            else:
+            elif isinstance(in_pheno_codes, pd.Series) or isinstance(in_pheno_codes, pd.DataFrame):
                 values_to_match = in_pheno_codes[pheno_requestcol]
+            else:
+                raise TypeError("Unexpected type for in_pheno_codes")
 
             # Assuming 'column_name'is the column where you want to check for the value" - Create a set of values from the second file's column 
 
@@ -3592,43 +3582,3 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     main(args.f,args.g,args.i,args.j,args.ExDepExc,args.ge,args.fcol,args.gcol,args.iidcol,args.bdcol,args.sexcol,args.fsep,args.gsep,args.o,args.eM,args.din,args.don,args.qced,args.DiagTypeExclusions,args.DiagTypeInclusions,args.LifetimeExclusion,args.PostExclusion,args.OneyPriorExclusion,args.eCc,args.Fyob,args.Fgender,args.verbose,args.BuildTestSet,args.testRun,args.MatchFI,args.skipICDUpdate,args.DateFormat,args.iidstatus,args.removePointInDiagCode,args.nthreads,args.name,args.BuildEntryExitDates,args.BuildOphold,args.write_pickle, args.write_fastGWA_format, args.write_Plink2_format,args.fDates,args.iDates,args.MinMaxAge,args.ICDCM,args.lpp, args.RegisterRun)
-
-# If wantig to start it locally in python and run through it step by step
-'''
-lpr_file = ""  # Diagnosis file
-pheno_request = "/dpibp/home/mislun/scripts/MDD.request"  # File with all Diagnostic codes to export
-stam_file = ""  # File adding information about Gender/Sex, Birthdate, etc.
-addition_information_file = ""  # File with additional IID information
-use_predefined_exdep_exclusions = ""  # List of diagnostic codes to exclude
-general_exclusions = ""  # General exclusion list
-diagnostic_col = "c_adiag"  # Column name of -f and -i file to be mapped
-pheno_requestcol = "c_adiag"  # Column name of -g file to be mapped against
-iidcol = "pnr"  # Column name of IDs in -f and -i file
-birthdatecol = "birthdate"  # Column name of Birthdate in files
-sexcol = "kqn"  # Column name of Sex/Gender in files
-main_pheno_name = "MDD"
-fsep = ","  # Separator of -f file
-gsep = ","  # Separator of -g file
-outfile = "/dpibp/home/mislun/scripts/MDD.result.tsv"  # Outfile name
-exact_match = False  # Exact Match flag
-input_date_in_name = "d_inddto"  # Column name of first diagnosis date
-input_date_out_name = "d_uddto"  # Column name of last diagnosis date
-qced_iids = ""  # List with all IIDs that pass initial QC
-ctype_excl = ""  # List of diagnostic types to exclude
-ctype_incl = ""  # List of diagnostic types to include
-lifetime_exclusions_file = ""  # Lifetime exclusions file
-post_exclusions_file = ""  # Post exclusions file
-oneYearPrior_exclusions_file = ""  # One Year Prior exclusions file
-exclCHBcontrols = False  # Exclude CHB controls flag
-Filter_YoB = ""  # Filter by Year of Birth
-Filter_Gender = ""  # Filter by Gender
-verbose = False  # Verbose output flag
-Build_Test_Set = False  # Build Test Set flag
-test_run = False  # Test Run flag
-MatchFI = False  # Match FI flag
-skip_icd_update = False  # Skip ICD Update flag
-DateFormat_in = "%d/%m/%Y"  # Format of Dates in your data
-iidstatus_col = ""  # Column name of IID status
-remove_point_in_diag_request = False  # Remove point in diag request flag
-num_threads = 8  # Number of threads to be used
-'''

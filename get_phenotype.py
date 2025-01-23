@@ -1071,11 +1071,15 @@ def build_phenotype_cases(df1, exact_match, values_to_match, diagnostic_col, bir
     else:
         if exact_match:
             tmp_result_df = df1[df1[diagnostic_col].isin(values_to_match)].copy()
+            
         else:
-            #pattern = '|'.join(map(str, values_to_match))
+            # Normalize patterns to lowercase for strings, keep non-strings as they are
+            patterns = tuple(p.lower() if isinstance(p, str) else p for p in values_to_match)
+            # Filter rows where the diagnostic_col starts with any pattern, ensuring only strings are converted to lowercase
+            tmp_result_df = df1[df1[diagnostic_col].apply(lambda x: x.lower().startswith(patterns) if isinstance(x, str) else x in patterns)].copy()#pattern = '|'.join(map(str, values_to_match))
             #tmp_result_df = df1[df1[diagnostic_col].str.startswith(values_to_match, na=False)].copy()
-            patterns = tuple(p.lower() for p in values_to_match)  # Normalize patterns to lowercase
-            tmp_result_df = df1[df1[diagnostic_col].str.lower().str.startswith(patterns, na=False)].copy()
+            #patterns = tuple(p.lower() for p in values_to_match)  # Normalize patterns to lowercase
+            #tmp_result_df = df1[df1[diagnostic_col].str.lower().str.startswith(patterns, na=False)].copy()
             del(patterns)
     if (verbose):
         print(tmp_result_df.columns)
@@ -2081,7 +2085,7 @@ def get_values_to_match(multi_inclusions,in_pheno_codes,pheno_requestcol,remove_
             values_to_match = set(str(value) for value in in_pheno_codes.iloc[0]["Disorder Codes"])
     return values_to_match
 
-def load_mapping_rows(file_path, iidcol, target_iids):
+def load_mapping_rows(file_path, iidcol, target_iids, fsep="\t"):
     """
     Load only rows mapping to a list of IIDs from a file.
     
@@ -2094,7 +2098,7 @@ def load_mapping_rows(file_path, iidcol, target_iids):
     - pd.DataFrame: DataFrame containing only the matching rows
     """
     # Step 1: Load only the `iidcol` column
-    iids_df = pd.read_csv(file_path, usecols=[iidcol])
+    iids_df = pd.read_csv(file_path, sep=fsep, usecols=[iidcol])
     # Ensure `iidcol` and `target_iids` are of the same type
     iids_df[iidcol] = iids_df[iidcol].astype(str)  # Cast column to string
     target_iids = [str(iid) for iid in target_iids]  # Cast target_iids to string
@@ -2104,7 +2108,7 @@ def load_mapping_rows(file_path, iidcol, target_iids):
     print(f"Identifying rows to load from df1 based on the current set of iids: matching_rows: {matching_rows[:10]}; iids in df1: {iids_df[:10]}; iids to grep: {target_iids[:10]}")
     # Step 3: Load only the matching rows
     # Prepare the `skiprows` argument to skip all rows except the header and matching rows
-    skip_rows = lambda x: x not in matching_rows
+    #skip_rows = lambda x: x not in matching_rows
     #skip_rows = set(range(len(iids_df))) - set(matching_rows)
     # final_df = pd.read_csv(file_path, skiprows=lambda x: x in skip_rows)
     
@@ -2959,6 +2963,63 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     #         plink2 = final_df[['#FID', 'IID', 'CaseControl']]
     #         plink2.to_csv(outfile+".plink2.pheno", sep="\t", index=False, quoting=False, mode='a', header=False)
 
+def batch_load_lprfile(df, lprfile, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose):
+    if verbose:
+        print(f"Loading lprfile {lprfile} in batch loop {batch_num + 1}")
+    df1_rows_to_keep = load_mapping_rows(lprfile, iidcol, iid_batch, fsep)
+    temp_file = str(uuid.uuid4())[:4]+".filtered_temp.csv"
+    build_temp_file(lprfile, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
+    lprfile = temp_file
+    # Identify the set of columns that are dates
+    df_header = pd.read_csv(lprfile, sep=fsep, dtype=object, nrows=0)
+    if verbose:
+        print(f"Header of the current lprfile: {df_header.columns}")
+    if(df_header.columns.empty):
+        print("ERROR: Could not load -f file: ",lprfile)
+        sys.exit()
+    if lpr_cols_to_read_as_date:
+        available_date_cols = list(set([col for col in lpr_cols_to_read_as_date if col in df_header.columns]))
+        if verbose:
+            print("INFO: The following cols are given in current lpr file and will be read as dates: ",available_date_cols)
+    else:
+        available_date_cols = list(set([col for col in potential_lpr_cols_to_read_as_date if col in df_header.columns]))
+        if verbose:
+            print("INFO: No cols supplied (lpr) that should be read as dates. Trying to infer them: ",available_date_cols)
+    del df_header
+    if available_date_cols:
+        try:
+            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, engine='python', parse_dates=available_date_cols, date_format=DateFormat)
+            if verbose:
+                print(f"Finished loading chunk {batch_num}. Appending it now to the dataframe (as multiple lpr files were supplied).")
+            df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
+        except TypeError:
+            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, engine='python', parse_dates=available_date_cols)
+            if verbose:
+                print(f"Finished loading chunk {batch_num}. (Within TypeError) Updating the dateformat and appending it to the dataframe (as multiple lpr files were supplied).")
+            for col in available_date_cols:
+                filtered_chunk[col] = pd.to_datetime(filtered_chunk[col], format=DateFormat, errors='coerce')
+            df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
+        except ValueError:
+            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, engine='python')
+            if verbose:
+                print(f"Finished loading chunk {batch_num}. (Within ValueError) Updating the dateformat and appending it to the dataframe (as multiple lpr files were supplied).")
+            for col in available_date_cols:
+                if col in filtered_chunk.columns:
+                    filtered_chunk[col] = pd.to_datetime(filtered_chunk[col], format=DateFormat, errors='coerce')
+            df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
+        #gc.collect()
+    else:
+        filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=str)
+        if verbose:
+            print(f"Finished loading chunk {batch_num}. (Within else) Appending it to the dataframe (as multiple lpr files were supplied).")
+        df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
+        #gc.collect()
+    if verbose:
+        print(f"In batch loop of batch_load_df1_process_pheno_and_exclusions with filtered_chunk.head(5):{filtered_chunk.head(5)}")
+    del filtered_chunk
+    #gc.collect()
+    #os.remove(temp_file)
+    return df
 
 
 def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic_col, lpr_cols_to_read_as_date, potential_lpr_cols_to_read_as_date, dta_input, MatchFI, df3, iidcol, verbose, ctype_excl, ctype_incl, Filter_YoB, Filter_Gender, use_predefined_exdep_exclusions, RegisterRun, dst, ipsych_run, dbds_run, cluster_run, exact_match, skip_icd_update, remove_point_in_diag_request, ICDCM, qced_iids, general_exclusions, multi_inclusions, in_pheno_codes, pheno_requestcol, atc_diag_col, birthdatecol, atc_date_col, atc_cols_to_read_as_date, atc_file, fsep, BuildEntryExitDates, lifetime_exclusions_file, post_exclusions_file, oneYearPrior_exclusions_file, outfile, write_Plink2_format, write_fastGWA_format, write_pickle, n_stam_iids, exclCHBcontrols, iidstatus_col, addition_information_file, sexcol, input_date_in_name, input_date_out_name, df4):
@@ -2967,6 +3028,7 @@ def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic
     num_batches = int(np.ceil(len(iids) / batch_size))  # Calculate the number of batches
     first_write = True  # Control whether to overwrite or append to the file
     df3backup = df3
+    df1 = pd.DataFrame()
     for batch_num in range(num_batches):
         # Get the current batch of IIDs
         start_idx = batch_num * batch_size
@@ -3000,61 +3062,7 @@ def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic
                     del filtered_chunk
                     #gc.collect()
                 else:
-                    if verbose:
-                        print(f"Loading lprfile {lprfile} in batch loop {batch_num + 1}")
-                    df1_rows_to_keep = load_mapping_rows(lprfile, iidcol, iid_batch)
-                    temp_file = str(uuid.uuid4())[:4]+".filtered_temp.csv"
-                    build_temp_file(lprfile, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
-                    lprfile = temp_file
-                    # Identify the set of columns that are dates
-                    df_header = pd.read_csv(lprfile, sep=fsep, dtype=object, nrows=0)
-                    if verbose:
-                        print(f"Header of the current lprfile: {df_header.columns}")
-                    if(df_header.columns.empty):
-                        print("ERROR: Could not load -f file: ",lprfile)
-                        sys.exit()
-                    if lpr_cols_to_read_as_date:
-                        available_date_cols = list(set([col for col in lpr_cols_to_read_as_date if col in df_header.columns]))
-                        if verbose:
-                            print("INFO: The following cols are given in current lpr file and will be read as dates: ",available_date_cols)
-                    else:
-                        available_date_cols = list(set([col for col in potential_lpr_cols_to_read_as_date if col in df_header.columns]))
-                        if verbose:
-                            print("INFO: No cols supplied (lpr) that should be read as dates. Trying to infer them: ",available_date_cols)
-                    del df_header
-                    if available_date_cols:
-                        try:
-                            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, engine='python', parse_dates=available_date_cols, date_format=DateFormat)
-                            if verbose:
-                                print(f"Finished loading chunk {batch_num}. Appending it now to the dataframe (as multiple lpr files were supplied).")
-                            df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
-                        except TypeError:
-                            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, engine='python', parse_dates=available_date_cols)
-                            if verbose:
-                                print(f"Finished loading chunk {batch_num}. (Within TypeError) Updating the dateformat and appending it to the dataframe (as multiple lpr files were supplied).")
-                            for col in available_date_cols:
-                                filtered_chunk[col] = pd.to_datetime(filtered_chunk[col], format=DateFormat, errors='coerce')
-                            df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
-                        except ValueError:
-                            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, engine='python')
-                            if verbose:
-                                print(f"Finished loading chunk {batch_num}. (Within ValueError) Updating the dateformat and appending it to the dataframe (as multiple lpr files were supplied).")
-                            for col in available_date_cols:
-                                if col in filtered_chunk.columns:
-                                    filtered_chunk[col] = pd.to_datetime(filtered_chunk[col], format=DateFormat, errors='coerce')
-                            df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
-                        #gc.collect()
-                    else:
-                        filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=str)
-                        if verbose:
-                            print(f"Finished loading chunk {batch_num}. (Within else) Appending it to the dataframe (as multiple lpr files were supplied).")
-                        df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
-                        #gc.collect()
-                    if verbose:
-                        print(f"In batch loop of batch_load_df1_process_pheno_and_exclusions with filtered_chunk.head(5):{filtered_chunk.head(5)}")
-                    del filtered_chunk
-                    #gc.collect()
-                    #os.remove(temp_file)
+                    df = batch_load_lprfile(df, lprfile, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose)
                 if multi_diag_cols:
                     df.rename(columns={diag_cols[curr]: diagnostic_col},inplace=True)
                     curr += 1
@@ -3080,7 +3088,7 @@ def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic
             for lprfile in file_paths:
                 if verbose:
                     print(f"Loading lprfile {lprfile} in batch loop {batch_num + 1}")
-                df1_rows_to_keep = load_mapping_rows(lprfile, lpr2nd_recnummer, recnum_batch)
+                df1_rows_to_keep = load_mapping_rows(lprfile, lpr2nd_recnummer, recnum_batch, fsep)
                 print(f"Keeping the following rows from secondary diagnosis file {lprfile} in batch loop {batch_num + 1}: {df1_rows_to_keep[:10]}")
                 temp_file = str(uuid.uuid4())[:4]+".filtered_temp.csv"
                 build_temp_file(lprfile, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
@@ -3137,48 +3145,15 @@ def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic
                 del filtered_chunk
                 gc.collect()
             else:
-                skip_rows = load_mapping_rows(lpr_file, iidcol, iid_batch)
-                if lpr_cols_to_read_as_date:
-                    try:
-                        filtered_chunk = pd.read_csv(lpr_file, skiprows=skip_rows, sep=fsep, dtype=object, engine='python', parse_dates=lpr_cols_to_read_as_date, date_format=DateFormat)
-                        df1 = pd.concat([df1, filtered_chunk], ignore_index=True, sort=False)
-                    except TypeError:
-                        filtered_chunk = pd.read_csv(lpr_file, skiprows=skip_rows, sep=fsep, dtype=object, engine='python', parse_dates=lpr_cols_to_read_as_date)
-                        for col in lpr_cols_to_read_as_date:
-                            filtered_chunk[col] = pd.to_datetime(filtered_chunk[col], format=DateFormat, errors='coerce')
-                        df1 = pd.concat([df1, filtered_chunk], ignore_index=True, sort=False)
-                    del filtered_chunk
-                    gc.collect()
-                else: 
-                    # Identify the set of columns that are dates
-                    df1 = pd.read_csv(lpr_file, sep=fsep, engine='python', dtype=object, nrows=0)
-                    if (df1.columns.empty):
-                        print("ERROR: Could not load -f file: ",lpr_file)
-                        sys.exit()
-                    available_date_cols = list(set([col for col in potential_lpr_cols_to_read_as_date if col in df1.columns]))
-                    print("INFO: No cols supplied (lpr) that should be read as dates. Trying to infer them: ",available_date_cols)
-                    if available_date_cols:
-                        try:
-                            filtered_chunk = pd.read_csv(lpr_file, skiprows=skip_rows, sep=fsep, dtype=object, engine='python', parse_dates=available_date_cols, date_format=DateFormat)
-                            df1 = pd.concat([df1, filtered_chunk], ignore_index=True, sort=False)
-                        except TypeError:
-                            filtered_chunk = pd.read_csv(lpr_file, skiprows=skip_rows, sep=fsep, dtype=object, engine='python', parse_dates=available_date_cols)
-                            for col in lpr_cols_to_read_as_date:
-                                filtered_chunk[col] = pd.to_datetime(filtered_chunk[col], format=DateFormat, errors='coerce')
-                            df1 = pd.concat([df1, filtered_chunk], ignore_index=True, sort=False)
-                        del filtered_chunk 
-                        gc.collect()
-                    else:
-                        filtered_chunk = pd.read_csv(lpr_file, skiprows=skip_rows, sep=fsep, dtype=str)
-                        df1 = pd.concat([df1, filtered_chunk], ignore_index=True, sort=False)
-                        del filtered_chunk 
-                        gc.collect()
+                df1 = batch_load_lprfile(df1, lpr_file, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose)
         gc.collect()
         if(exact_match):
             print("Info: Updating the diagnostic codes to be all Uppercase to be able to run --eM")
-            for index, value in df1[diagnostic_col].items():
-                if isinstance(value, str):
-                    df1.at[index, diagnostic_col] = value.upper()
+            # Ensure only strings are processed and apply the transformation in one go
+            df1[diagnostic_col] = df1[diagnostic_col].apply(lambda x: x.upper() if isinstance(x, str) else x)
+            # for index, value in df1[diagnostic_col].items():
+            #     if isinstance(value, str):
+            #         df1.at[index, diagnostic_col] = value.upper()
         print(f"At the end of batch_load_df1_process_pheno_and_exclusions with df1.head(5):{df1.head(5)}")
         if first_write == True and len(df1) > 0:
             process_pheno_and_exclusions(MatchFI=MatchFI, df1=df1, df3=df3, df4=df4, iidcol=iidcol, verbose=verbose, ctype_excl=ctype_excl, ctype_incl=ctype_incl, Filter_YoB=Filter_YoB, Filter_Gender=Filter_Gender, use_predefined_exdep_exclusions=use_predefined_exdep_exclusions, RegisterRun=RegisterRun, dst=dst, ipsych_run=ipsych_run, dbds_run=dbds_run, cluster_run=cluster_run, exact_match=exact_match, skip_icd_update=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, qced_iids=qced_iids, general_exclusions=general_exclusions, multi_inclusions=multi_inclusions, in_pheno_codes=in_pheno_codes, pheno_requestcol=pheno_requestcol, diagnostic_col=diagnostic_col, atc_diag_col=atc_diag_col, birthdatecol=birthdatecol, atc_date_col=atc_date_col, atc_cols_to_read_as_date=atc_cols_to_read_as_date, atc_file=atc_file, fsep=fsep, BuildEntryExitDates=BuildEntryExitDates, lifetime_exclusions_file=lifetime_exclusions_file, post_exclusions_file=post_exclusions_file, oneYearPrior_exclusions_file=oneYearPrior_exclusions_file, outfile=outfile, write_Plink2_format=write_Plink2_format, write_fastGWA_format=write_fastGWA_format, write_pickle=write_pickle, n_stam_iids=n_stam_iids, exclCHBcontrols=exclCHBcontrols, iidstatus_col=iidstatus_col, addition_information_file=addition_information_file, sexcol=sexcol, input_date_in_name=input_date_in_name, input_date_out_name=input_date_out_name, append=False)
@@ -3503,18 +3478,28 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             if len(columns) == 2:
                 multi_inclusions = True
                 print("Information: Detected 2 columns in Inclusion file. Inclusions will be ", in_pheno_codes_lines)
-                # Remove spaces from each line
-                in_pheno_codes = [line.replace(' ', '') for line in in_pheno_codes_lines]
+            
+                # Remove spaces and empty lines from each line
+                in_pheno_codes_lines = [line.strip() for line in in_pheno_codes_lines if line.strip()]
 
-                # Create a dictionary from the cleaned lines
-                process_line = lambda line: (line.strip().split('\t')[0], line.strip().split('\t')[1].split(','))
-                disorder_dict = dict(map(process_line, in_pheno_codes))
+                # Process lines into a list of tuples
+                processed_lines = [
+                    (line.split('\t')[0].strip(), line.split('\t')[1].strip())
+                    for line in in_pheno_codes_lines[1:]  # Skip the header
+                    if '\t' in line  # Ensure the line contains a tab
+                ]
 
-                # Create a DataFrame from the dictionary
-                in_pheno_codes = pd.DataFrame(list(disorder_dict.items()), columns=['Disorder', 'Disorder Codes'])
+                # Create a DataFrame from the processed lines
+                in_pheno_codes = pd.DataFrame(processed_lines, columns=['Disorder', 'Disorder Codes'])
 
-                # Assuming `pheno_requestcol` is the name of the column you want to check
-                column_values = in_pheno_codes['Disorder Codes']  # Extract the specific column
+                # Remove rows where all columns are empty or contain only whitespace
+                in_pheno_codes = in_pheno_codes.dropna(how='all').applymap(str.strip).replace('', pd.NA).dropna(how='all')
+
+                # Create a dictionary for further processing
+                disorder_dict = dict(zip(in_pheno_codes['Disorder'], in_pheno_codes['Disorder Codes'].str.split(',')))
+
+                # Extract the specific column if needed
+                column_values = in_pheno_codes['Disorder Codes']
 
                 # Check if all or any values in the column start with 'ATC'
                 if all(str(value).startswith('ATC') for value in column_values):
@@ -3552,7 +3537,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
 
                     #print("Codes used: ",updated_codes)
                 # Clean up
-                del(in_pheno_codes_lines, columns, process_line, disorder_dict, updated_codes)
+                del(in_pheno_codes_lines, columns, processed_lines, disorder_dict, updated_codes)
             
             elif len(columns) == 1:
                 multi_inclusions = False
@@ -3968,9 +3953,10 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                             del(df1_temp)
             if(exact_match):
                 print("Info: Updating the diagnostic codes to be all Uppercase to be able to run --eM")
-                for index, value in df1[diagnostic_col].items():
-                    if isinstance(value, str):
-                        df1.at[index, diagnostic_col] = value.upper()
+                df1[diagnostic_col] = df1[diagnostic_col].apply(lambda x: x.upper() if isinstance(x, str) else x)
+                # for index, value in df1[diagnostic_col].items():
+                #     if isinstance(value, str):
+                #         df1.at[index, diagnostic_col] = value.upper()
             print("Info: Finished loading -f file(s)")
 
             if (birthdatecol in df1.columns and birthdatecol != "birthdate"):

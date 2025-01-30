@@ -2680,13 +2680,17 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     except Exception as e:
         print(f"Error processing date columns: {e}. Attempting to fix formats...")
 
-        # Attempt to infer the correct date format
+        # Convert to datetime, force errors to NaT
         result_df['temp_first_dx'] = pd.to_datetime(result_df['temp_first_dx'], errors='coerce')
         result_df['temp_birthdate'] = pd.to_datetime(result_df['temp_birthdate'], errors='coerce')
 
-        # Drop rows with NaT values if necessary or handle them appropriately
+        # Ensure both are timezone-naive
+        result_df['temp_first_dx'] = result_df['temp_first_dx'].dt.tz_localize(None)
+        result_df['temp_birthdate'] = result_df['temp_birthdate'].dt.tz_localize(None)
+
+        # Drop rows with NaT values if necessary
         mask_valid = result_df[['temp_first_dx', 'temp_birthdate']].notna().all(axis=1)
-        
+
         age_first_dx = (
             result_df.loc[case_indices & mask_valid, 'temp_first_dx'] - 
             result_df.loc[case_indices & mask_valid, 'temp_birthdate']

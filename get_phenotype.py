@@ -2671,7 +2671,28 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     print(type(result_df.loc[case_indices, 'temp_first_dx']))
     print(type(result_df.loc[case_indices, 'temp_birthdate']))
     # Calculate the age at first diagnosis
-    age_first_dx = (pd.to_datetime(result_df.loc[case_indices, 'temp_first_dx'], format=DateFormat) - pd.to_datetime(result_df.loc[case_indices, 'temp_birthdate'], format=DateFormat)).dt.days // 365
+    #age_first_dx = (pd.to_datetime(result_df.loc[case_indices, 'temp_first_dx'], format=DateFormat) - pd.to_datetime(result_df.loc[case_indices, 'temp_birthdate'], format=DateFormat)).dt.days // 365
+    try:
+        age_first_dx = (
+            pd.to_datetime(result_df.loc[case_indices, 'temp_first_dx'], format=DateFormat) - 
+            pd.to_datetime(result_df.loc[case_indices, 'temp_birthdate'], format=DateFormat)
+        ).dt.days // 365
+    except Exception as e:
+        print(f"Error processing date columns: {e}. Attempting to fix formats...")
+
+        # Attempt to infer the correct date format
+        result_df['temp_first_dx'] = pd.to_datetime(result_df['temp_first_dx'], errors='coerce')
+        result_df['temp_birthdate'] = pd.to_datetime(result_df['temp_birthdate'], errors='coerce')
+
+        # Drop rows with NaT values if necessary or handle them appropriately
+        mask_valid = result_df[['temp_first_dx', 'temp_birthdate']].notna().all(axis=1)
+        
+        age_first_dx = (
+            result_df.loc[case_indices & mask_valid, 'temp_first_dx'] - 
+            result_df.loc[case_indices & mask_valid, 'temp_birthdate']
+        ).dt.days // 365
+
+
     # Assign the calculated values to the DataFrame
     result_df.loc[case_indices, 'Age_FirstDx'] = age_first_dx
     print(result_df.loc[case_indices, ["diagnosis", "temp_first_dx", "temp_birthdate"]].head())

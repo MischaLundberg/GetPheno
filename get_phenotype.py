@@ -3751,13 +3751,19 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                     print("INFO: No cols supplied (stam) that should be read as dates. Trying to infer them: ",available_date_cols)
                     if available_date_cols:
                         try:
-                            df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, parse_dates=available_date_cols, date_format=DateFormat)
-                        except TypeError:
                             df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, parse_dates=available_date_cols)
+                        except Exception as e:
+                            print(f"WARNING: Failed to parse dates from {available_date_cols}. Error: {e}")
+                            df3 = pd.read_csv(stam_file, sep=fsep, dtype=object)
+                            
+                        # Ensure correct date format after reading
+                        for col in available_date_cols:
+                            df3[col] = pd.to_datetime(df3[col], errors='coerce', format=DateFormat)
                     else:
                         try:
                             df3 = pd.read_csv(stam_file, sep=fsep, dtype=str)
-                        except TypeError:
+                        except Exception as e:
+                            print(f"WARNING: Failed to read CSV with dtype=str. Error: {e}")
                             df3 = pd.read_csv(stam_file, sep=fsep, engine='python', dtype=str)
         print("Info: Finished loading -i file(s)")
         if verbose:

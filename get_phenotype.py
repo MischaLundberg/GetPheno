@@ -2866,6 +2866,14 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         print(50*"#")
     n_final_iids = final_df[iidcol].nunique()
     print("INFO: The input STAM file had ",n_stam_iids," IIDs listed. The Output file of this script has ",n_final_iids," IIDs listed.")
+    if "stat_x" in final_df.columns and not "stat" in final_df.columns:
+        final_df.rename(columns={"stat_x":"stat"},inplace=True)
+        if "stat_y" in final_df.columns:
+            final_df.drop("stat_y", inplace=True, axis=1)
+    if "statd_x" in final_df.columns and not "statd" in final_df.columns:
+        final_df.rename(columns={"statd_x":"statd"},inplace=True)
+        if "statd_y" in final_df.columns:
+            final_df.drop("statd_y", inplace=True, axis=1)
     if "fkode" in final_df.columns:
         #As exclusion criterion
         min_code = 5000
@@ -3721,7 +3729,8 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                         except TypeError:
                             df3 = pd.read_csv(stam_file, sep=fsep, engine='python', dtype=str)
         print("Info: Finished loading -i file(s)")
-
+        if verbose:
+            print(f"Header of your -i file: {df3.head(5)}")
         # Check if input is plausible (e.g. contains every IID only once)
         if (len(df3) > len(df3[iidcol].unique())):
             print("WARNING: Your input file -i contains duplicated IIDs. If this should not be the case, please check your input!")
@@ -4060,7 +4069,7 @@ if __name__ == '__main__':
     parser.add_argument('--ge', required=False, default='', help='General exclusion list. This referrs to a list of IIDs that should be excluded from the study. Within CHB/DBDS it will default to /data/preprocessed/genetics/chb_degen_freeze_20210503/degen_exclusion_latest') 
     parser.add_argument('--qced',required=False, default='', help='List with all IIDs that pass initial QC. Default: "%(default)s" (or \'/data/preprocessed/genetics/chb_degen_freeze_20210503/DEGEN_GSA_FINAL.fam\' in CHB/DBDS)')
     parser.add_argument('--name', required=False, default='MainPheno', help='Define your main Phenotype name. Defaults to "%(default)s"')
-    parser.add_argument('--fcol', required=False, default="pnr", help='Columname of -f and -i file to be mapped. Defaulting to "%(default)s" (or diagnosis in CHB/DBDS)')
+    parser.add_argument('--fcol', required=False, default="c_adiag", help='Columname of -f and -i file to be mapped. Defaulting to "%(default)s" (or diagnosis in CHB/DBDS)')
     parser.add_argument('--gcol', required=False, default="c_adiag", help='Columname of -g file to be mapped against. Defaulting to "%(default)s" (or diagnosis in CHB/DBDS)') 
     parser.add_argument('--iidcol', required=False, default="pnr", help='Columname of IDs in -f and -i file. Defaulting to "%(default)s" (or cpr_enc in CHB/DBDS)')
     parser.add_argument('--bdcol', required=False, default="birthdate", help='Columname of Birthdate in files. Defaults to "%(default)s"')

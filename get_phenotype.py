@@ -976,8 +976,8 @@ def get_earliest_date(date_list):
 
 def process_ExDEP_exclusions(data, iidcol, diagcol, dx_name, dates_name, verbose, update_diag_col_name_to_diag, get_earliest_date_from_data=False):
     # CHB/DBDS: A is main diagnosis, B is secondary, G is grundmorbus, H is referral - Excluding suspected diagnosis (through general practitionair who refers to Hospital) with coding H 
-    if ('type' in data.columns):
-        data = data.loc[data["type"].isin(["A","B","G","H"])]
+    #if ('type' in data.columns):
+    #    data = data.loc[data["type"].isin(["A","B","G","H"])]
     if (update_diag_col_name_to_diag and diagcol in data.columns):
         data.rename(columns={diagcol:"diagnosis"},inplace=True)
     if (verbose):
@@ -2871,10 +2871,25 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         min_code = 5000
         max_code = 7000
         print("INFO: Updating Information about DK born or not. This uses everything between 5000-7000 on the fkode as non-DK. Find more details here https://www.dst.dk/da/Statistik/dokumentation/Times/cpr-oplysninger/foedreg-kode")
-        final_df['both_parents_DK'] = False
-        final_df.loc[(final_df['fkode_m'] >= min_code) & (final_df['fkode_m'] <= max_code) & (final_df['fkode_f'] >= min_code) & (stam['fkode_f'] <= max_code), 'both_parents_DK'] = True
-        final_df['DK_born'] = False
-        final_df.loc[(final_df['fkode'] >= min_code) & (final_df['fkode'] <= max_code), 'DK_born'] = True
+        try:
+            final_df['both_parents_DK'] = False
+            final_df['fkode_m'] = pd.to_numeric(final_df['fkode_m'], errors='coerce')
+            final_df['fkode_f'] = pd.to_numeric(final_df['fkode_f'], errors='coerce')
+            final_df['fkode'] = pd.to_numeric(final_df['fkode'], errors='coerce')
+            #final_df.loc[(final_df['fkode_m'] >= min_code) & (final_df['fkode_m'] <= max_code) & (final_df['fkode_f'] >= min_code) & (final_df['fkode_f'] <= max_code), 'both_parents_DK'] = True
+            # Check if both parents have codes within the given range
+            final_df.loc[
+                (final_df['fkode_m'].between(min_code, max_code)) & 
+                (final_df['fkode_f'].between(min_code, max_code)), 
+                'both_parents_DK'
+            ] = True
+            final_df['DK_born'] = False
+            #final_df.loc[(final_df['fkode'] >= min_code) & (final_df['fkode'] <= max_code), 'DK_born'] = True
+            final_df.loc[final_df['fkode'].between(min_code, max_code), 'DK_born'] = True
+        except Exception as e:
+            print(f"An error occurred while comparing final_df['fkode','fkode_m','fkode_f'], and min_code/max_code.")
+            print(f"Head of the file:\n{final_df[['fkode','fkode_m', 'fkode_f']].head(5)}")
+            print(f"Error message: {e}")
     write_mode = 'w'
     write_header = True
     if append:
@@ -3079,9 +3094,24 @@ def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic
                 df1 = pd.concat([df1, df], ignore_index=True, sort=False)
                 del(df)
             del(file_paths)
-        #TODO: Add the check if lpr2nd_file is a list or a single file.
+        else:
+            # Load the first file as a DataFrame(should be phenotype file) 
+            if dta_input:
+                chunk = pd.read_stata(lpr_file)
+                # Filter rows where the first column (index 0) matches the IIDs
+                filtered_chunk = chunk[chunk[iidcol].isin(iid_batch)]
+                df1 = pd.concat([df1, filtered_chunk], ignore_index=True, sort=False)
+                del chunk
+                del filtered_chunk
+                gc.collect()
+            else:
+                df1 = batch_load_lprfile(df1, lpr_file, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose)
+                #TODO: Add the check if lpr2nd_file is a list or a single file.
         if lpr2nd_file != "" and recnums_to_keep:
-            file_paths = lpr2nd_file.split(',')
+            if ',' in lpr2nd_file:
+                file_paths = lpr2nd_file.split(',')
+            else:
+                file_paths = [lpr2nd_file]
             recnum_batch = recnums_to_keep #sorted(df[lpr_recnummer].unique())
             recnums_to_keep = []
             print(f"Identified {len(recnum_batch)} recnums to load from secondary diagnosis files within batch {batch_num + 1}.")
@@ -3134,18 +3164,6 @@ def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic
                 del(df1_temp)
                 del(lprfile)
             del(file_paths)
-        else:
-            # Load the first file as a DataFrame(should be phenotype file) 
-            if dta_input:
-                chunk = pd.read_stata(lpr_file)
-                # Filter rows where the first column (index 0) matches the IIDs
-                filtered_chunk = chunk[chunk[iidcol].isin(iid_batch)]
-                df1 = pd.concat([df1, filtered_chunk], ignore_index=True, sort=False)
-                del chunk
-                del filtered_chunk
-                gc.collect()
-            else:
-                df1 = batch_load_lprfile(df1, lpr_file, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose)
         gc.collect()
         if(exact_match):
             print("Info: Updating the diagnostic codes to be all Uppercase to be able to run --eM")
@@ -3166,7 +3184,7 @@ def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic
 
 
 #need to handle double counts and exclusions
-def main(lpr_file, pheno_request, stam_file, addition_information_file, use_predefined_exdep_exclusions, general_exclusions, diagnostic_col, pheno_requestcol, iidcol, birthdatecol, sexcol, fsep, gsep, outfile, exact_match, input_date_in_name, input_date_out_name, qced_iids, ctype_excl, ctype_incl, lifetime_exclusions_file, post_exclusions_file, oneYearPrior_exclusions_file, exclCHBcontrols, Filter_YoB, Filter_Gender, verbose, Build_Test_Set, test_run, MatchFI, skip_icd_update, DateFormat_in, iidstatus_col, remove_point_in_diag_request, num_threads, main_pheno_name, BuildEntryExitDates, build_ophold, write_pickle, write_fastGWA_format, write_Plink2_format, lpr_cols_to_read_as_date, stam_cols_to_read_as_date, MinMaxAge, ICDCM, load_precreated_phenotypes, RegisterRun, lowMem, batchsize, noLeadingICD, lpr_file2, recnum, recnum2, f2col, atc_file, atc_diag_col, argstring):
+def main(lpr_file, pheno_request, stam_file, addition_information_file, use_predefined_exdep_exclusions, general_exclusions, diagnostic_col, pheno_requestcol, iidcol, birthdatecol, sexcol, fsep, gsep, outfile, exact_match, input_date_in_name, input_date_out_name, qced_iids, ctype_excl, ctype_incl, lifetime_exclusions_file, post_exclusions_file, oneYearPrior_exclusions_file, exclCHBcontrols, Filter_YoB, Filter_Gender, verbose, Build_Test_Set, test_run, MatchFI, skip_icd_update, DateFormat_in, iidstatus_col, remove_point_in_diag_request, num_threads, main_pheno_name, BuildEntryExitDates, build_ophold, write_pickle, write_fastGWA_format, write_Plink2_format, lpr_cols_to_read_as_date, stam_cols_to_read_as_date, MinMaxAge, ICDCM, load_precreated_phenotypes, RegisterRun, lowMem, batchsize, noLeadingICD, lpr_file2, recnum, recnum2, f2col, atc_file, atc_diag_col, runLPRonly, runPSYKonly, argstring):
     global DateFormat
     global ATC_Requested
     global id_diagnostics
@@ -3272,6 +3290,12 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             stam_cols_to_read_as_date = ['fdato']#,'statd','fdato_m','fdato_f','statd_m','statd_f']
             lpr_file = "E://Data/rawdata/703935/Ipsych2016/Dst/psyk_adm2018.dta,E://Data/rawdata/703935/Ipsych2016/Dst/lpradm1977_2018.dta" 
             lpr2nd_file = "E://Data/rawdata/703935/Ipsych2016/Dst/psyk_diag2018.dta,E://Data/rawdata/703935/Ipsych2016/Dst/lprdiag1977_2018.dta" 
+            if runLPRonly:
+                lpr_file = "E://Data/rawdata/703935/Ipsych2016/Dst/lpradm1977_2018.dta" 
+                lpr2nd_file = "E://Data/rawdata/703935/Ipsych2016/Dst/lprdiag1977_2018.dta" 
+            if runPSYKonly:
+                lpr_file = "E://Data/rawdata/703935/Ipsych2016/Dst/psyk_adm2018.dta" 
+                lpr2nd_file = "E://Data/rawdata/703935/Ipsych2016/Dst/psyk_diag2018.dta" 
             #lpr_file = "E://Data/rawdata/703935/Population/psyk_adm2016.dta,E://Data/rawdata/703935/Population/lpr_adm2016b.dta" #"E://Data/rawdata/703935/HEALTH/psyk_adm2016.dta,E://Data/rawdata/703935/HEALTH/lpr_adm2016b.dta"
             addition_information_file = "E://Data/rawdata/703935/Population/ipsych2015design_v2.dta"  #"E://Data/rawdata/703935/Population/stamdata2016.dta"
             diagnostic_col="c_adiag"
@@ -3296,6 +3320,10 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             stam_file = "/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/stamdata2016.csv"
             stam_cols_to_read_as_date = ['fdato','statd','fdato_m','fdato_f','statd_m','statd_f']
             lpr_file = "/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/psyk_adm2016.csv,/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/lpr_adm2016.csv"
+            if runLPRonly:
+                lpr_file = "/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/lpr_adm2016.csv"
+            if runPSYKonly:
+                lpr_file = "/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/psyk_adm2016.csv"
             addition_information_file = "" #"/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/civil2016.csv"
             diagnostic_col="c_adiag"
             pheno_requestcol = "diagnosis"
@@ -3311,6 +3339,12 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         stam_file = "/dpibp/data/raw/2021-03-18_register_clean/stamdata2016.csv"
         lpr_file = "/dpibp/data/raw/2021-03-18_register_clean/psyk_adm2016.csv,/dpibp/data/raw/2021-03-18_register_clean/lpr_adm2016.csv"
         lpr2nd_file = "/dpibp/data/raw/2021-03-18_register_clean/psyk_diag2016.csv,/dpibp/data/raw/2021-03-18_register_clean/lpr_diag2016.csv" 
+        if runLPRonly:
+            lpr_file = "/dpibp/data/raw/2021-03-18_register_clean/lpr_adm2016.csv"
+            lpr2nd_file = "/dpibp/data/raw/2021-03-18_register_clean/lpr_diag2016.csv" 
+        if runPSYKonly:
+            lpr_file = "/dpibp/data/raw/2021-03-18_register_clean/psyk_adm2016.csv"
+            lpr2nd_file = "/dpibp/data/raw/2021-03-18_register_clean/psyk_diag2016.csv" 
         lpr_recnummer = 'k_recnum'
         lpr2nd_recnummer = 'v_recnum'
         diagnostic2nd_col = 'c_diag'
@@ -3474,18 +3508,23 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         with open(pheno_request, 'r') as file:
             in_pheno_codes_lines = file.readlines()
             columns = in_pheno_codes_lines[0].strip().replace(" ", "").split('\t')
-            
+            detected_header = False
             if len(columns) == 2:
                 multi_inclusions = True
-                print("Information: Detected 2 columns in Inclusion file. Inclusions will be ", in_pheno_codes_lines)
-            
+                if "Diagnosis" in columns[1] or "Diagnoses" in columns[1]:
+                    detected_header = True
+                else:
+                    print("INFO: No header identified (needs to be either 'Diagnosis' or 'Diagnoses' in first column of first row). We will use the first column as Naming and second column for Diagnostic codes.")
+                print(f"INFO: Detected 2 columns in Inclusion file. Inclusions will be {in_pheno_codes_lines}. Header detected in your request file: {detected_header}. First column: {columns[1]}.")
+                if detected_header:
+                    in_pheno_codes_lines = in_pheno_codes_lines[1:] #Skip Header
                 # Remove spaces and empty lines from each line
                 in_pheno_codes_lines = [line.strip() for line in in_pheno_codes_lines if line.strip()]
 
                 # Process lines into a list of tuples
                 processed_lines = [
                     (line.split('\t')[0].strip(), line.split('\t')[1].strip())
-                    for line in in_pheno_codes_lines[1:]  # Skip the header
+                    for line in in_pheno_codes_lines
                     if '\t' in line  # Ensure the line contains a tab
                 ]
 
@@ -3542,10 +3581,19 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             elif len(columns) == 1:
                 multi_inclusions = False
                 print("Information: You supplied a file with only one column for Inclusions.")
-                in_pheno_codes = pd.read_csv(pheno_request, sep=gsep, dtype=str)#, header=0)s
+                in_pheno_codes = pd.read_csv(pheno_request, sep=gsep, dtype=str, header=None, skip_blank_lines=True, on_bad_lines='warn')#, header=0)s
                 if verbose:
                     print(in_pheno_codes,",",pheno_requestcol)
-
+                
+                if pheno_requestcol == in_pheno_codes[0][0]:
+                    detected_header = True
+                    in_pheno_codes = in_pheno_codes[1:]
+                else:
+                    print("INFO: No header identified that overlapps with the specified {pheno_requestcol}. We will not use any of the supplied rows in the input file and apply the name {pheno_requestcol} to it.")
+                in_pheno_codes.rename(columns={0:pheno_requestcol},inplace=True)
+                #if detected_header:
+                #    in_pheno_codes_lines = in_pheno_codes_lines[1:] #Skip Header
+                
                 # Assuming `pheno_requestcol` is the name of the column you want to check
                 if (type(in_pheno_codes) == list):
                     column_values = in_pheno_codes
@@ -4012,7 +4060,7 @@ if __name__ == '__main__':
     parser.add_argument('--ge', required=False, default='', help='General exclusion list. This referrs to a list of IIDs that should be excluded from the study. Within CHB/DBDS it will default to /data/preprocessed/genetics/chb_degen_freeze_20210503/degen_exclusion_latest') 
     parser.add_argument('--qced',required=False, default='', help='List with all IIDs that pass initial QC. Default: "%(default)s" (or \'/data/preprocessed/genetics/chb_degen_freeze_20210503/DEGEN_GSA_FINAL.fam\' in CHB/DBDS)')
     parser.add_argument('--name', required=False, default='MainPheno', help='Define your main Phenotype name. Defaults to "%(default)s"')
-    parser.add_argument('--fcol', required=False, default="c_adiag", help='Columname of -f and -i file to be mapped. Defaulting to "%(default)s" (or diagnosis in CHB/DBDS)')
+    parser.add_argument('--fcol', required=False, default="pnr", help='Columname of -f and -i file to be mapped. Defaulting to "%(default)s" (or diagnosis in CHB/DBDS)')
     parser.add_argument('--gcol', required=False, default="c_adiag", help='Columname of -g file to be mapped against. Defaulting to "%(default)s" (or diagnosis in CHB/DBDS)') 
     parser.add_argument('--iidcol', required=False, default="pnr", help='Columname of IDs in -f and -i file. Defaulting to "%(default)s" (or cpr_enc in CHB/DBDS)')
     parser.add_argument('--bdcol', required=False, default="birthdate", help='Columname of Birthdate in files. Defaults to "%(default)s"')
@@ -4057,6 +4105,8 @@ if __name__ == '__main__':
     parser.add_argument('--nthreads', default=8, help='DEPRECATED! - How many threads should be used. Default: "%(default)s"'),
     parser.add_argument('--lowmem', action='store_true', help='Experimental! - This will devide the LPR file into groups of each 100.000 individuals, run the phenotype on them, save it to file and then run the nex 100k until the end. This will increase the runtime.'),
     parser.add_argument('--batchsize', required=False, default=100000, help='Experimental! - This will set the batches (when --lowmem is set) to the desired value. Default: "%(default)s"'),
+    parser.add_argument('--PSYK', action='store_true', help='Experimental! - To run only based on the PSYK diagnoses.'),
+    parser.add_argument('--LPR', action='store_true', help='Experimental! - To run only based on the LPR diagnoses.'),
     parser.add_argument('--verbose', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
@@ -4073,7 +4123,7 @@ if __name__ == '__main__':
             arg_name = action.option_strings[0]  # Use the first option string (e.g., --arg1)
             argstring = argstring+(f"{arg_name}: {value} (default: {default_value})\n")
 
-    main(args.f,args.g,args.i,args.j,args.ExDepExc,args.ge,args.fcol,args.gcol,args.iidcol,args.bdcol,args.sexcol,args.fsep,args.gsep,args.o,args.eM,args.din,args.don,args.qced,args.DiagTypeExclusions,args.DiagTypeInclusions,args.LifetimeExclusion,args.PostExclusion,args.OneyPriorExclusion,args.eCc,args.Fyob,args.Fgender,args.verbose,args.BuildTestSet,args.testRun,args.MatchFI,args.skipICDUpdate,args.DateFormat,args.iidstatus,args.removePointInDiagCode,args.nthreads,args.name,args.BuildEntryExitDates,args.BuildOphold,args.write_pickle, args.write_fastGWA_format, args.write_Plink2_format,args.fDates,args.iDates,args.MinMaxAge,args.ICDCM,args.lpp, args.RegisterRun, args.lowmem, args.batchsize, args.noLeadingICD, args.f2, args.recnum, args.recnum2, args.f2col, args.atc, args.atccol, argstring)
+    main(args.f,args.g,args.i,args.j,args.ExDepExc,args.ge,args.fcol,args.gcol,args.iidcol,args.bdcol,args.sexcol,args.fsep,args.gsep,args.o,args.eM,args.din,args.don,args.qced,args.DiagTypeExclusions,args.DiagTypeInclusions,args.LifetimeExclusion,args.PostExclusion,args.OneyPriorExclusion,args.eCc,args.Fyob,args.Fgender,args.verbose,args.BuildTestSet,args.testRun,args.MatchFI,args.skipICDUpdate,args.DateFormat,args.iidstatus,args.removePointInDiagCode,args.nthreads,args.name,args.BuildEntryExitDates,args.BuildOphold,args.write_pickle, args.write_fastGWA_format, args.write_Plink2_format,args.fDates,args.iDates,args.MinMaxAge,args.ICDCM,args.lpp, args.RegisterRun, args.lowmem, args.batchsize, args.noLeadingICD, args.f2, args.recnum, args.recnum2, args.f2col, args.atc, args.atccol, args.LPR, args.PSYK, argstring)
 
 # If wantig to start it locally in python and run through it step by step
 '''

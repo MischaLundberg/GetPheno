@@ -724,7 +724,7 @@ def update_icd_coding_DBDSCHB(data):
     ]
     return data
 
-def update_icd_coding(data, dst=False, dbdschb=False, ipsych=False, eM=False, skip=False, remove_point_in_diag_request=False, ICDCM=False, RegisterRun=False, no_Fill=False, remove_leading_ICD=False):
+def update_icd_coding(data, dst=False, dbdschb=False, ipsych=False, eM=False, skip=False, remove_point_in_diag_request=False, ICDCM=False, RegisterRun=False, no_Fill=False, remove_leading_ICD=False, noLeadingICD=False):
     if (not skip):
         output_list = []
         updateICD9 = False
@@ -937,6 +937,10 @@ def update_icd_coding(data, dst=False, dbdschb=False, ipsych=False, eM=False, sk
                 Unknown_system = True
                 if remove_point_in_diag_request or RegisterRun:
                     entry = str(entry).replace('.', '')  # remove '.' from the entry
+            if noLeadingICD:
+                prefixes = ['ICD10:', 'ICD10-CM:', 'ICD9:', 'ICD9-CM:', 'ICD8:']
+                for prefix in prefixes:
+                    entry = str(entry).replace(prefix, '')
             if (not skipEntry):
                 output_list.append(entry)
             if(dbdschb or ipsych):
@@ -3572,7 +3576,8 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                         skip=skip_icd_update, 
                         remove_point_in_diag_request=remove_point_in_diag_request,
                         ICDCM=ICDCM,
-                        RegisterRun=RegisterRun
+                        RegisterRun=RegisterRun,
+                        noLeadingICD=noLeadingICD
                     )
                     
                     print(updated_codes)
@@ -3631,7 +3636,8 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                         skip=skip_icd_update, 
                         remove_point_in_diag_request=remove_point_in_diag_request,
                         ICDCM=ICDCM,
-                        RegisterRun=RegisterRun
+                        RegisterRun=RegisterRun,
+                        noLeadingICD=noLeadingICD
                     )
                 if verbose:
                     print(in_pheno_codes,",",pheno_requestcol)
@@ -3834,38 +3840,38 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             min_Age = 18
             max_Age = 50
             # Intellectual Disability / Mental retardation
-            id_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=ID_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM)
+            id_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=ID_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD)
             # Schizophrenia
-            scz_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=SCZ_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM)
+            scz_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=SCZ_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD)
             # Bipolar Disorder
-            bpd_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=BPD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM)
+            bpd_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=BPD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD)
             # Dementia
-            dem_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=DEM_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM)
+            dem_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=DEM_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD)
             # Alcohol use Disorder
-            aud_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=AUD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM)
+            aud_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=AUD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD)
             # Drug use Disorder
-            dud_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=DUD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM)
+            dud_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=DUD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD)
             # Mild cognitive Impairment (MCI)
-            mci_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=MCI_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM)
+            mci_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=MCI_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD)
             # Concurrent terminal illness
-            cti_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=CTI_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM)
+            cti_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=CTI_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD)
             #Chronic Pain
-            pain_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=CP_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            gad_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=GAD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            pd_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=PD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            phobias_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=Phobias_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            anx_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=ANX_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            ptsd_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=PTSD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            ocd_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=OCD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            adhd_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=ADHD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            asd_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=ASD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            bul_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=BUL_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            ano_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=ANO_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            sleepdisorder_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=Sleep_Disorder_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            AD_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=AD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            Pain_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=Pain_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            Chronic_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=Chronic_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=False, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
-            Other_Mental_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=Other_Mental_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=False, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM) 
+            pain_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=CP_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            gad_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=GAD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            pd_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=PD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            phobias_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=Phobias_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            anx_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=ANX_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            ptsd_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=PTSD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            ocd_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=OCD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            adhd_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=ADHD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            asd_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=ASD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            bul_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=BUL_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            ano_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=ANO_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            sleepdisorder_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=Sleep_Disorder_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            AD_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=AD_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            Pain_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=Pain_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            Chronic_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=Chronic_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=False, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
+            Other_Mental_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=Other_Mental_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=False, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
         
         if not lowMem:
             if ',' in lpr_file:

@@ -2147,6 +2147,82 @@ def build_temp_file(file_path, row_indices, temp_file="filtered_temp.csv", index
     # Clean up the temporary index file
     #os.remove(index_file)
 
+def load_lpr_file(lpr_file, dta_input, fsep, lpr_cols_to_read_as_date, DateFormat, potential_lpr_cols_to_read_as_date):
+    """
+    Load a single LPR file, handling date parsing where necessary.
+    """
+    if dta_input:
+        return pd.read_stata(lpr_file)
+    else:
+        # Check the date cols and read the head
+        # Identify the set of columns that are dates
+        df_header = pd.read_csv(lpr_file, sep=fsep, dtype=object, nrows=0)
+        if lpr_cols_to_read_as_date:
+                lpr_cols_to_read_as_date = list(set([col for col in lpr_cols_to_read_as_date if col in df_header]))
+                print("INFO: We identified the following columns to be present and to be used as date columns: ",lpr_cols_to_read_as_date)  
+        if not lpr_cols_to_read_as_date:
+                lpr_cols_to_read_as_date = list(set([col for col in potential_lpr_cols_to_read_as_date if col in df_header]))
+                print("INFO: No cols supplied (lpr) that should be read as dates. Trying to infer them: ",lpr_cols_to_read_as_date)     
+        try:
+            return pd.read_csv(
+                lpr_file, sep=fsep, dtype=object, engine='python',
+                parse_dates=lpr_cols_to_read_as_date, date_format=DateFormat
+            )
+        except TypeError as error:
+            print("ERROR: While reading lpr file with added date_format (",str(DateFormat),") information: ",error)
+            df = pd.read_csv(lpr_file, sep=fsep, dtype=object, parse_dates=lpr_cols_to_read_as_date)
+                       
+            for col in lpr_cols_to_read_as_date:
+                df[col] = pd.to_datetime(df[col], format=DateFormat, errors='coerce')
+            return df
+
+def merge_secondary_diagnoses(df1, df, diagnostic_col, lpr_recnummer, lpr2nd_recnummer, diagnostic2nd_col):
+    """
+    Merges secondary diagnosis data with the primary dataset.
+    """
+    df.rename(columns={lpr2nd_recnummer: lpr_recnummer, diagnostic2nd_col: diagnostic_col}, inplace=True)
+    df1_temp = pd.merge(df[[diagnostic_col, lpr_recnummer]], df1.drop(columns=[diagnostic_col], errors='ignore'), on=lpr_recnummer, how='inner')
+    df1_temp.drop_duplicates(inplace=True)
+    
+    if "c_tildiag" in df1_temp.columns and "c_diagtype" in df1_temp.columns:
+        df1_temp.loc[df1_temp["c_diagtype"].str.contains("+", na=False), diagnostic_col] = df1_temp["c_tildiag"]
+    
+    return pd.concat([df1, df1_temp], ignore_index=True, sort=False)
+
+def process_lpr_data(lpr_file, lpr2nd_file, dta_input, fsep, lpr_cols_to_read_as_date, DateFormat, potential_lpr_cols_to_read_as_date, diagnostic_col, diagnostic2nd_col, lpr_recnummer, lpr2nd_recnummer):
+    """
+    Process the LPR data, loading primary and optionally merging secondary diagnoses.
+    """
+    file_paths = lpr_file.split(',') if ',' in lpr_file else [lpr_file]
+    df1 = pd.concat([load_lpr_file(fp, dta_input, fsep, lpr_cols_to_read_as_date, DateFormat, potential_lpr_cols_to_read_as_date) for fp in file_paths], ignore_index=True, sort=False)
+   
+    if lpr2nd_file:
+        print("INFO: Removing entries with DZ03* or DZ763 and merging secondary diagnoses.")
+        df1 = df1[~df1[diagnostic_col].str.startswith(('DZ03', 'DZ763'), na=False)]
+        secondary_paths = lpr2nd_file.split(',') if ',' in lpr2nd_file else [lpr2nd_file]
+        
+        for lprfile in secondary_paths:
+            df = load_lpr_file(lprfile, dta_input, fsep, lpr_cols_to_read_as_date, DateFormat, potential_lpr_cols_to_read_as_date)
+            df1 = merge_secondary_diagnoses(df1, df, diagnostic_col, lpr_recnummer, lpr2nd_recnummer, diagnostic2nd_col)
+    
+    return df1
+
+def finalize_lpr_data(df1, diagnostic_col, birthdatecol, verbose):
+    """
+    Finalize the loaded LPR data, renaming columns where necessary.
+    """
+    if diagnostic_col in df1.columns and diagnostic_col != "diagnosis":
+        df1.rename(columns={diagnostic_col: "diagnosis"}, inplace=True)
+        if verbose:
+            print("Updated diagnostic_col name to 'diagnosis'.")
+    
+    if birthdatecol in df1.columns and birthdatecol != "birthdate":
+        df1.rename(columns={birthdatecol: "birthdate"}, inplace=True)
+        if verbose:
+            print("Updated birthdatecol name to 'birthdate'.")
+    
+    return df1
+
 
 def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl, ctype_incl, Filter_YoB, Filter_Gender, use_predefined_exdep_exclusions, RegisterRun, dst, ipsych_run, dbds_run, cluster_run, exact_match, skip_icd_update, remove_point_in_diag_request, ICDCM, qced_iids, general_exclusions, multi_inclusions, in_pheno_codes, pheno_requestcol, diagnostic_col, atc_diag_col, birthdatecol, atc_date_col, atc_cols_to_read_as_date, atc_file, fsep, BuildEntryExitDates, lifetime_exclusions_file, post_exclusions_file, oneYearPrior_exclusions_file, outfile, write_Plink2_format, write_fastGWA_format, write_pickle, n_stam_iids, exclCHBcontrols, iidstatus_col, addition_information_file, sexcol, input_date_in_name, input_date_out_name, append, df4):
     print(f"Starting process_pheno_and_exclusions with df1.head(5):{df1.head(5)}")
@@ -3015,6 +3091,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     #         plink2 = final_df[['#FID', 'IID', 'CaseControl']]
     #         plink2.to_csv(outfile+".plink2.pheno", sep="\t", index=False, quoting=False, mode='a', header=False)
 
+#TODO: Update to be more efficient and to use the new lpr_load functions
 def batch_load_lprfile(df, lprfile, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose):
     if verbose:
         print(f"Loading lprfile {lprfile} in batch loop {batch_num + 1}")
@@ -3173,9 +3250,9 @@ def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic
                 before_rows = len(filtered_chunk)
                 print(f"Identified {before_rows} rows of secondary diagnoses to be added to the main dataframe. {filtered_chunk.head(5)}.")
                 # Remove rows where 'diag_type' column has 'H'
-                if 'c_diagtype' in filtered_chunk.columns:
-                    filtered_chunk = filtered_chunk[filtered_chunk['c_diagtype'] != 'H']
-                    print(f"Removed {before_rows - len(filtered_chunk)} rows of secondary diagnoses as they were a referral diagnosis from the General Practitioner (\"H\").")
+                #if 'c_diagtype' in filtered_chunk.columns:
+                #    filtered_chunk = filtered_chunk[filtered_chunk['c_diagtype'] != 'H']
+                #    print(f"Removed {before_rows - len(filtered_chunk)} rows of secondary diagnoses as they were a referral diagnosis from the General Practitioner (\"H\").")
                 if lpr_recnummer != lpr2nd_recnummer:
                     filtered_chunk.rename(columns={lpr2nd_recnummer: lpr_recnummer},inplace=True)
                 if diagnostic_col != diagnostic2nd_col:
@@ -3186,11 +3263,18 @@ def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic
                     on=lpr_recnummer, 
                     how='inner'  # Only keep rows with matching recnum values
                 )
+                if "c_tildiag" in df1_temp.columns:
+                    filtered_chunk = df1_temp.copy()
+                    filtered_chunk.drop(columns=[diagnostic_col],inplace=True)
+                    filtered_chunk.rename(columns={"c_tildiag": diagnostic_col},inplace=True)
+                    df1_temp = pd.concat([df1_temp, filtered_chunk], ignore_index=True, sort=False)
                 before_rows = len(df1_temp)
                 df1_temp.drop_duplicates(inplace=True)
                 print(f"After merging df with filtered_chunk, we have {before_rows} entries. {before_rows - len(df1_temp)} entries were deleted due to duplication. {df1_temp.head(5)}.\n{df1_temp.describe(include='all')}")
                 before_rows = len(df1)
                 df1 = pd.concat([df1, df1_temp], ignore_index=True, sort=False)
+                if(verbose):
+                    df1.to_csv(outfile+".df1_2nd_merged", sep="\t", index=False, quoting=False)
                 print(f"Finally, batch {batch_num + 1} resulted in {len(df1)} ({before_rows}+{len(df1_temp)}) entries to be used to determine the CaseControl status.")
                 #gc.collect()
                 if verbose:
@@ -3584,7 +3668,10 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                     ATC_Requested = "Some"
                 else:
                     ATC_Requested = "None"  # Optional case to handle if none start with 'ATC'
-                    
+                
+                if ATC_Requested != "None":
+                    print("Identified ATC codes to export.")
+                
                 if verbose:
                     print(in_pheno_codes['Disorder Codes'])
 
@@ -3905,168 +3992,27 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             Other_Mental_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=Other_Mental_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=False, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
         
         if not lowMem:
-            if ',' in lpr_file:
-                # Split the string by comma
-                file_paths = lpr_file.split(',')
-                multi_diag_cols = False
-                if ',' in diagnostic_col:
-                    diag_cols = diagnostic_col.split(',')
-                    multi_diag_cols = True
-                    diagnostic_col = diag_cols[0]
-                    curr=0
-                # Now file_paths is a list containing individual file paths
-                # Initialize an empty DataFrame to store the concatenated data
-                df1 = pd.DataFrame()
-                # Iterate over each file path
-                for lprfile in file_paths:
-                    # Read the CSV file and append it to df1
-                    if dta_input:
-                        df = pd.read_stata(lprfile)
-                    else:
-                        if lpr_cols_to_read_as_date:
-                            try:
-                                df = pd.read_csv(lprfile, sep=fsep, dtype=object, engine='python', parse_dates=lpr_cols_to_read_as_date, date_format=DateFormat)
-                                for col in lpr_cols_to_read_as_date:
-                                    df[col] = pd.to_datetime(df[col], format=DateFormat, errors='coerce')
-                            except TypeError as error:
-                                print("ERROR: While reading lpr file with added date_format (",str(DateFormat),") information: ",error)
-                                df = pd.read_csv(lprfile, sep=fsep, dtype=object, parse_dates=lpr_cols_to_read_as_date) 
-                                for col in lpr_cols_to_read_as_date:
-                                    df[col] = pd.to_datetime(df[col], format=DateFormat, errors='coerce')
-                        else:    
-                            # Identify the set of columns that are dates
-                            df = pd.read_csv(lprfile, sep=fsep, dtype=object, nrows=0)
-                            if(df.columns.empty):
-                                print("ERROR: Could not load -f file: ",lprfile)
-                                sys.exit()
-                            available_date_cols = list(set([col for col in potential_lpr_cols_to_read_as_date if col in df.columns]))
-                            print("INFO: No cols supplied (lpr) that should be read as dates. Trying to infer them: ",available_date_cols)
-                            if available_date_cols:
-                                try:
-                                    df = pd.read_csv(lprfile, sep=fsep, dtype=object, parse_dates=available_date_cols, date_format=DateFormat)
-                                except TypeError:
-                                    df = pd.read_csv(lprfile, sep=fsep, dtype=object, parse_dates=available_date_cols)
-                                    for col in lpr_cols_to_read_as_date:
-                                        df[col] = pd.to_datetime(df[col], format=DateFormat, errors='coerce')
-                            else:
-                                df = pd.read_csv(lprfile, sep=fsep, dtype=str)
-                    if multi_diag_cols:
-                        df.rename(columns={diag_cols[curr]: diagnostic_col},inplace=True)
-                        curr += 1
-                    df1 = pd.concat([df1, df], ignore_index=True, sort=False)
-                    del(df)
-                if lpr2nd_file != "":
-                    print("INFO: As you are also loading the files containing the secondary diagnoses, we will remove all rows in the standard LPR that refer to DZ03* or DZ763 as these may lead to issues. In addition, we will also remove all \'H\' diag_types.")
-                    # Remove rows where diagnostic_col refers to accompanying persons. Recommended by Dorte Helenius on 10.01.2025
-                    df1 = df1[~df1[diagnostic_col].str.startswith(('DZ03', 'DZ763'), na=False)]
-                    file_paths = lpr2nd_file.split(',')
-                    for lprfile in file_paths:
-                        # Read the CSV file and append it to df1
-                        if dta_input:
-                            df = pd.read_stata(lprfile)
-                        else:
-                            df = pd.read_csv(lprfile, sep=fsep, dtype=str)
-                        # Remove rows where 'diag_type' column has 'H'
-                        df = df[df['c_diagtype'] != 'H']
-                        if lpr_recnummer != lpr2nd_recnummer:
-                            df.rename(columns={lpr2nd_recnummer: lpr_recnummer},inplace=True)
-                        if diagnostic_col != diagnostic2nd_col:
-                            df.rename(columns={diagnostic2nd_col: diagnostic_col},inplace=True)
-                        df1_temp = pd.merge(
-                            df[[diagnostic_col, lpr_recnummer]], 
-                            df1.drop(columns=[diagnostic_col], errors='ignore'), 
-                            on=[lpr_recnummer], 
-                            how='inner'  # Use 'inner', 'outer', 'left', or 'right' as needed
-                        )
-                        before_rows = len(df1_temp)
-                        df1_temp.drop_duplicates(inplace=True)
-                        print(f"After merging df with filtered_chunk, we have {before_rows} entries. {before_rows - len(df1_temp)} entries were deleted due to duplication. {df1_temp.head(5)}.\n{df1_temp.describe(include='all')}")
-                        del(df)
-                        before_rows = len(df1)
-                        df1 = pd.concat([df1, df1_temp], ignore_index=True, sort=False)
-                        print(f"Finally, the adding of secondary diagnoses resulted in {len(df1)} ({before_rows}+{len(df1_temp)}) entries to be used to determine the CaseControl status.")
-                        del(df1_temp)
-                del(lprfile)
-                del(file_paths)
-            else:
-                # Load the first file as a DataFrame(should be phenotype file) 
-                if dta_input:
-                    print("WARNING: .DTA files are not yet supported to be read in with --lowmem flag. Reading in the whole file at once.")
-                    df1 = pd.read_stata(lpr_file)
-                else:
-                    if lpr_cols_to_read_as_date:
-                        try:
-                            df1 = pd.read_csv(lpr_file, sep=fsep, engine='python', dtype=object, parse_dates=lpr_cols_to_read_as_date, date_format=DateFormat)
-                        except TypeError:
-                            df1 = pd.read_csv(lpr_file, sep=fsep, engine='python', dtype=object, parse_dates=lpr_cols_to_read_as_date)
-                            for col in lpr_cols_to_read_as_date:
-                                df1[col] = pd.to_datetime(df1[col], format=DateFormat, errors='coerce')
-                    else: 
-                        # Identify the set of columns that are dates
-                        df1 = pd.read_csv(lpr_file, sep=fsep, engine='python', dtype=object, nrows=0)
-                        if (df1.columns.empty):
-                            print("ERROR: Could not load -f file: ",lpr_file)
-                            sys.exit()
-                        available_date_cols = list(set([col for col in potential_lpr_cols_to_read_as_date if col in df1.columns]))
-                        print("INFO: No cols supplied (lpr) that should be read as dates. Trying to infer them: ",available_date_cols)
-                        if available_date_cols:
-                            try:
-                                df1 = pd.read_csv(lpr_file, sep=fsep, engine='python', dtype=object, parse_dates=lpr_cols_to_read_as_date, date_format=DateFormat)
-                            except TypeError:
-                                df1 = pd.read_csv(lpr_file, sep=fsep, engine='python', dtype=object, parse_dates=available_date_cols)
-                                for col in lpr_cols_to_read_as_date:
-                                    df1[col] = pd.to_datetime(df1[col], format=DateFormat, errors='coerce')
-                        else:
-                            df1 = pd.read_csv(lpr_file, sep=fsep, engine='python', dtype=str)
-                        if lpr2nd_file != "":
-                            print("INFO: As you are also loading the files containing the secondary diagnoses, we will remove all rows in the standard LPR that refer to DZ03* or DZ763 as these may lead to issues. In addition, we will also remove all \'H\' diag_types.")
-                            # Remove rows where diagnostic_col refers to accompanying persons. Recommended by Dorte Helenius on 10.01.2025
-                            df1 = df1[~df1[diagnostic_col].str.startswith(('DZ03', 'DZ763'), na=False)]
-                            # Read the CSV file and append it to df1
-                            if dta_input:
-                                df = pd.read_stata(lpr2nd_file)
-                            else:
-                                df = pd.read_csv(lpr2nd_file, sep=fsep, dtype=str)
-                            # Remove rows where 'diag_type' column has 'H'
-                            df = df[df['c_diagtype'] != 'H']
-                            if lpr_recnummer != lpr2nd_recnummer:
-                                df.rename(columns={lpr2nd_recnummer: lpr_recnummer},inplace=True)
-                            if diagnostic_col != diagnostic2nd_col:
-                                df.rename(columns={diagnostic2nd_col: diagnostic_col},inplace=True)
-                            df1_temp = pd.merge(
-                                df[[diagnostic_col, lpr_recnummer]], 
-                                df1.drop(columns=[diagnostic_col], errors='ignore'),
-                                on=[lpr_recnummer], 
-                                how='inner'  # Use 'inner', 'outer', 'left', or 'right' as needed
-                            )
-                            print(f"After merging df with filtered_chunk, we have {before_rows} entries. {before_rows - len(df1_temp)} entries were deleted due to duplication. {df1_temp.head(5)}.\n{df1_temp.describe(include='all')}")
-                            df1_temp.drop_duplicates(inplace=True)
-                            del(df)
-                            df1 = pd.concat([df1, df1_temp], ignore_index=True, sort=False)
-                            print(f"Finally, batch {batch_num + 1} resulted in {len(df)} ({before_rows}+{len(df1_temp)}) entries to be used to determine the CaseControl status.")
-                            del(df1_temp)
+            df1 = process_lpr_data(
+                lpr_file, lpr2nd_file, dta_input, fsep, lpr_cols_to_read_as_date, 
+                DateFormat, potential_lpr_cols_to_read_as_date, diagnostic_col, diagnostic2nd_col, 
+                lpr_recnummer, lpr2nd_recnummer
+            )
+
+            df1 = finalize_lpr_data(df1, diagnostic_col, birthdatecol, verbose)
+            
+            diagnostic_col = "diagnosis"
+            birthdatecol = "birthdate"
+
             if(exact_match):
                 print("Info: Updating the diagnostic codes to be all Uppercase to be able to run --eM")
                 df1[diagnostic_col] = df1[diagnostic_col].apply(lambda x: x.upper() if isinstance(x, str) else x)
-                # for index, value in df1[diagnostic_col].items():
-                #     if isinstance(value, str):
-                #         df1.at[index, diagnostic_col] = value.upper()
-            print("Info: Finished loading -f file(s)")
-
-            if (birthdatecol in df1.columns and birthdatecol != "birthdate"):
-                df1.rename(columns={birthdatecol: "birthdate"},inplace=True)
-                if (verbose):
-                    print("Updating birthdatecol name in df1.")
-
-            if (diagnostic_col in df1.columns and diagnostic_col != "diagnosis"):
-                df1.rename(columns={diagnostic_col: "diagnosis"},inplace=True)
-                if (verbose):
-                    print("Updating diagnostic_col name in df1 to \"diagnosis\".")
 
             if (verbose):
                 print(df1.columns)
                 print("Mem after loading lpr_file input:")
                 usage()
+            else:
+                print("Info: Finished loading -f file(s)")
 
             # Check if input is plausible (e.g. contains every IID only once)
             if (len(df1) > len(df1[iidcol].unique())):
@@ -4090,7 +4036,6 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         print(diclaimer_text)
         print(f"Your Arguments used to start this program:\n{argstring}")
         
-
 
 
 

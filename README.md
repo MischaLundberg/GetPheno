@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.14932835.svg)](https://zenodo.org/doi/10.5281/zenodo.14932835)
+
 # GetPheno
 [Build Phenotypes](#1-build-phenotypes)
 

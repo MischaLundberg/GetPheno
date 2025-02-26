@@ -11,7 +11,7 @@ import pandas as pd
 from pandas.errors import ParserWarning
 import warnings
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import socket
 import random
 from concurrent.futures import ThreadPoolExecutor
@@ -657,11 +657,6 @@ def split_and_format(input_str, fill=False):
     else:
         raise ValueError("Input string format is invalid: (",type(input_str),") ", input_str)
 
-def add_items_to_comma_list(old_comma_list, new_list_item):
-    temp_list = old_comma_list.apply(lambda x: [item for item in x.split(',') if item.strip() != ''])
-    temp_list = old_comma_list + new_list_item
-    return(','.join(temp_list))
-
 # Function to get Memory usage
 def usage():
     gc.collect()
@@ -669,63 +664,8 @@ def usage():
     mem_used = process.memory_info()[0] / float(1024 * 1024 * 1024) #2 ** 20)
     print("Memory usage in GB: "+str(mem_used))
 
-
-# Check if the date is in a format so we can use pd.to_datetime or not
-def is_valid_datetime(date_string, date_format):
-    try:
-        datetime.strptime(date_string, date_format)
-        return True
-    except ValueError:
-        return False
-    except TypeError:
-        return False
-
-
-# Function to convert DDMMYY10 to DD/MM/YYYY
-def convert_date_old(date_str):
-    if is_valid_datetime(date_str, "DD/MM/YYYY"):
-        try:
-            date_obj = datetime.strptime(str(date_str), "%d%m%y")
-            formatted_date = date_obj.strftime("%d/%m/%Y")
-            return formatted_date
-        except ValueError:
-            try:
-                return pd.to_datetime(date_str, format=DateFormat)
-            except:
-                return "Invalid Date"  # Handle invalid date strings if needed
-    else:
-        try:
-            return pd.to_datetime(date_str, format=DateFormat)
-        except:
-            return "Invalid Date"  # Handle invalid date strings if needed
-
-# Function to convert DDMMYY10 to DD/MM/YYYY
-def convert_date(date_str):
-    global DateFormat
-    if isinstance(date_str, pd.Timestamp):
-        return date_str  # Return the Timestamp object directly
-    try:
-        # Try parsing as DDMMYY10 format
-        date_obj = datetime.strptime(str(date_str), DateFormat)
-        return pd.to_datetime(date_obj, format=DateFormat)
-    except ValueError:
-        try:
-            # Try parsing as a datetime object using pandas
-            return pd.to_datetime(date_str, errors='coerce', format=DateFormat)
-        except ValueError:
-            return None  # Return None if the date format is invalid
-
-# Function to add appropriate coding to diagnostic codes for CHB/DBDS Data
-def update_icd_coding_DBDSCHB(data):
-    data = ','.join(map(str, data))
-    data = data.split(",")
-    data = [
-        "ICD8:" + str(value) if isinstance(value, (int, float)) else "ICD10:D" + str(value).replace('.', '')
-        for value in data
-    ]
-    return data
-
-def update_icd_coding(data, dst=False, dbdschb=False, ipsych=False, eM=False, skip=False, remove_point_in_diag_request=False, ICDCM=False, RegisterRun=False, no_Fill=False, remove_leading_ICD=False, noLeadingICD=False):
+def update_icd_coding(data, dst=False, dbdschb=False, ipsych=False, eM=False, skip=False, remove_point_in_diag_request=False, ICDCM=False, RegisterRun=False, no_Fill=False, noLeadingICD=False):
+    remove_leading_ICD = not noLeadingICD
     if (not skip):
         output_list = []
         updateICD9 = False
@@ -979,46 +919,6 @@ def calculate_age(row, date_column, dob_column):
 def get_earliest_date(date_list):
     return min(date_list)
 
-def process_ExDEP_exclusions(data, iidcol, diagcol, dx_name, dates_name, verbose, update_diag_col_name_to_diag, get_earliest_date_from_data=False):
-    # CHB/DBDS: A is main diagnosis, B is secondary, G is grundmorbus, H is referral - Excluding suspected diagnosis (through general practitionair who refers to Hospital) with coding H 
-    #if ('type' in data.columns):
-    #    data = data.loc[data["type"].isin(["A","B","G","H"])]
-    if (update_diag_col_name_to_diag and diagcol in data.columns):
-        data.rename(columns={diagcol:"diagnosis"},inplace=True)
-    if (verbose):
-        print("data: ",data.columns)
-        print(data.head(2))
-    grouped = data.groupby([iidcol],group_keys=False)
-    if (verbose):
-        print(data.columns)
-        print(iidcol)
-        print(diagcol)
-        print(dx_name)
-        print(verbose)
-        print(get_earliest_date_from_data)
-        print(grouped["diagnoses"].head(5))
-        print(grouped["in_dates"].head(5))
-    dx_string = grouped[['diagnoses']].first().reset_index()
-    in_dates = grouped[['in_dates']].first().reset_index()
-    if (get_earliest_date_from_data):
-        if "first_dx" in data.columns:
-            earliest_in_dates = grouped['first_dx']
-        else:
-            earliest_in_dates = grouped['in_dates'].apply(get_earliest_date).reset_index(name=(dx_name+'_earliest_date'))
-        id_dx_date_df = pd.merge(dx_string, in_dates, on=iidcol).merge(earliest_in_dates, on=iidcol)
-    else:
-        id_dx_date_df = pd.merge(dx_string, in_dates, on=iidcol)
-    id_dx_date_df.rename(columns={"diagnoses":dx_name},inplace=True)
-    id_dx_date_df.rename(columns={"in_dates":dates_name},inplace=True)
-    if (verbose):
-        print(id_dx_date_df.head(2))
-        print(id_dx_date_df.columns)
-    del data
-    del grouped
-    del dx_string
-    del in_dates
-    return(id_dx_date_df)
-    
 def reformat_to_tsv(file):
     # Define the command to process the file
     command = f"""
@@ -1037,12 +937,6 @@ def reformat_to_tsv(file):
     subprocess.run(command, shell=True, check=True)
 
 
-# Use boolean indexing to extract rows from the first file that match the values #values_to_match = '|'.join(map(re.escape, values_to_match_in))
-#if (exact_match):
-#    tmp_result_df = df1[df1[diagnostic_col].isin(values_to_match)].copy() #df1[df1[diagnostic_col].isin(values_to_match)].copy()
-#else:
-#    #tmp_result_df = df1[df1[diagnostic_col].str.contains(values_to_match, na=False)].copy()
-#    tmp_result_df = df1[df1[diagnostic_col].str.contains('|'.join(str(values_to_match)), na=False)].copy()
 #TODO: ATC checks and differing case identification
 def build_phenotype_cases(df1, exact_match, values_to_match, diagnostic_col, birthdatecol, iidcol, input_date_in_name, input_date_out_name, verbose, Covariates=False, Covar_Name="", general_results=pd.DataFrame(), BuildEntryExitDates=False):
     if (type(df1) == list):
@@ -1079,16 +973,15 @@ def build_phenotype_cases(df1, exact_match, values_to_match, diagnostic_col, bir
             
         else:
             # Normalize patterns to lowercase for strings, keep non-strings as they are
-            patterns = tuple(p.lower() for p in values_to_match if isinstance(p, str))
-            #patterns = tuple(p.lower() if isinstance(p, str) else p for p in values_to_match)
+            patterns = tuple(str(p).lower() for p in values_to_match) #patterns = tuple(p.lower() for p in values_to_match if isinstance(p, str))
             # Filter rows where the diagnostic_col starts with any pattern, ensuring only strings are converted to lowercase
-            tmp_result_df = df1[df1[diagnostic_col].apply(
-                lambda x: x.lower().startswith(patterns) if isinstance(x, str) else str(x) in patterns
-            )].copy()
-            #tmp_result_df = df1[df1[diagnostic_col].apply(lambda x: x.lower().startswith(patterns) if isinstance(x, str) else x in patterns)].copy()#pattern = '|'.join(map(str, values_to_match))
-            #tmp_result_df = df1[df1[diagnostic_col].str.startswith(values_to_match, na=False)].copy()
-            #patterns = tuple(p.lower() for p in values_to_match)  # Normalize patterns to lowercase
-            #tmp_result_df = df1[df1[diagnostic_col].str.lower().str.startswith(patterns, na=False)].copy()
+            tmp_result_df = df1[
+                df1[diagnostic_col].apply(
+                    lambda x: x.lower().startswith(patterns) if isinstance(x, str) else str(x) in patterns
+                )
+            ].copy() #tmp_result_df = df1[df1[diagnostic_col].apply(
+            #    lambda x: x.lower().startswith(patterns) if isinstance(x, str) else str(x) in patterns
+            #)].copy()
             del(patterns)
     if (verbose):
         print(tmp_result_df.columns)
@@ -1158,20 +1051,6 @@ def build_phenotype_cases(df1, exact_match, values_to_match, diagnostic_col, bir
             print(covar.columns)
         return covar
 
-
-def build_phenotype_controls(df1, exact_match, values_to_match, diagnostic_col, birthdatecol, iidcol, input_date_in_name, input_date_out_name, verbose, BuildEntryExitDates=False):
-    global DateFormat
-    # Use boolean indexing to extract rows from the first file that match the values 
-    if (exact_match):
-        tmp_result_df = df1[~df1[diagnostic_col].isin(values_to_match)].copy()
-    else:
-        tmp_result_df = df1[~df1[diagnostic_col].str.contains('|'.join(values_to_match), na=False)].copy()
-    if (verbose):
-        print(tmp_result_df.columns)
-        print(input_date_in_name, ", ",iidcol, ", ", diagnostic_col )
-    print("Identified initially ",str(tmp_result_df[iidcol].nunique())," IIDs that do not have an overlapping diagnostic code.")
-    return merge_IIDs(tmp_result_df, diagnostic_col, birthdatecol, input_date_in_name, input_date_out_name, iidcol, verbose, Cases=False, BuildEntryExitDates=BuildEntryExitDates)
-    
 
 def merge_IIDs(tmp_result_df, diagnostic_col, birthdatecol, input_date_in_name, input_date_out_name, iidcol, verbose, Cases, Covariates=False, BuildEntryExitDates=False):
     if verbose:
@@ -1525,10 +1404,6 @@ def remove_duplicates_preserve_order(lst):
             seen.add(item)
     return result
 
-def split_comma_string(data):
-    return data.apply(lambda x: x.split(','))
-
-
 def Build_sankey_data(data, fn, iidcol, verbose=False):
     data['Level3_Sankey'] = [[] for _ in range(len(data))]
     data['Level3_Sankey_data'] = [[] for _ in range(len(data))]
@@ -1613,7 +1488,14 @@ def Exclusion_interpreter(data, excl, type, min_Age, max_Age, exclnumber, verbos
         sys.exit()
     ##### Exclude Cases based on their Age of first diagnosis
     # Set date for first diagnosis
-    data['temp_Level2_dates'] = data['Level2_dates'].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
+    data["temp_Level2_dates"] = data["Level2_dates"].apply(
+    lambda x: [
+            convert_if_not_datetime(item)
+            for item in (x if isinstance(x, list) else [x]) 
+            if str(item).strip() != ""
+        ]
+    ).copy()
+    #data['temp_Level2_dates'] = data['Level2_dates'].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
     if (verbose):
         print("temp_Level2_dates: ",data.loc[(data['diagnosis'] == "Case"),'temp_Level2_dates'])
     case_rows = data['temp_Level2_dates'].apply(lambda x: len(x) > 0 if isinstance(x, list) else False)
@@ -1624,7 +1506,10 @@ def Exclusion_interpreter(data, excl, type, min_Age, max_Age, exclnumber, verbos
     if (len(data.loc[case_rows])>0):
         if (verbose):
             print(data.loc[case_rows,['diagnosis','temp_Level2_dates','temp_birthdate','birthdate']])
-        data.loc[case_rows, "Level2_FirstDx"] = data.loc[case_rows, "Level2_FirstDx"] + data.loc[case_rows, "temp_Level2_dates"].apply(lambda x: [min(x)] if x else [])
+        data.loc[case_rows, "Level2_FirstDx"] = data.loc[case_rows, ["Level2_FirstDx", "temp_Level2_dates"]].apply(lambda row: [min(row["Level2_FirstDx"] + row["temp_Level2_dates"])] if (row["Level2_FirstDx"] + row["temp_Level2_dates"]) else [], axis=1)
+        if (verbose):
+            print(data.loc[case_rows,['Level2_FirstDx','temp_birthdate']])
+        #data.loc[case_rows, "Level2_FirstDx"] = data.loc[case_rows, "Level2_FirstDx"] + data.loc[case_rows, "temp_Level2_dates"].apply(lambda x: [min(x)] if x else [])
         # Recalculate age at first Diagnosis
         if (verbose):
             print(data.loc[case_rows])
@@ -1733,19 +1618,36 @@ def ExDEP_exclusion_interpreter(data, min_Age, max_Age, verbose):
     print("Updating Case-Diagnoses based on " + diag + " ExDEP exclusions.")
     data = update_DxDates_ExDEP_multi_exclusion(data, "lifetime", diag, diag_date, diag_inflicted, 4, "Level2_diagnoses", "Level2_dates", "diagnoses_Level2_modifier", "date_Level2_modifier", 'disorder_Level2_modifier', verbose)
     # Set date for first diagnosis
-    data['temp_Level2_dates'] = data['Level2_dates'].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
+    data["temp_Level2_dates"] = data["Level2_dates"].apply(
+    lambda x: [
+            convert_if_not_datetime(item)
+            for item in (x if isinstance(x, list) else [x]) 
+            if str(item).strip() != ""
+        ]
+    ).copy()
+    #data['temp_Level2_dates'] = data['Level2_dates'].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
     case_rows = data['Level2_dates'].apply(lambda x: len(x) > 0)
     data['temp_birthdate'] = data['birthdate']
     if (len(data.loc[case_rows])>0):
-        data.loc[case_rows, "Level2_FirstDx"] = data.loc[case_rows, "Level2_FirstDx"] + data.loc[case_rows, "temp_Level2_dates"].apply(lambda x: [min(x)] if x else [])
+        data.loc[case_rows, "Level2_FirstDx"] = data.loc[case_rows, ["Level2_FirstDx", "temp_Level2_dates"]].apply(lambda row: [min(row["Level2_FirstDx"] + row["temp_Level2_dates"])] if (row["Level2_FirstDx"] + row["temp_Level2_dates"]) else [], axis=1)
+        #data.loc[case_rows, "Level2_FirstDx"] = data.loc[case_rows, "Level2_FirstDx"] + data.loc[case_rows, "temp_Level2_dates"].apply(lambda x: [min(x)] if x else [])
         # Recalculate age at first Diagnosis
         if (verbose):
             print(data.loc[case_rows])
             print(data.loc[case_rows,['Level2_FirstDx','temp_birthdate','birthdate']])
         data['Level3_Age_FirstDx'] = 0
-        data['temp_birthdate'] = pd.to_datetime(data['temp_birthdate'], errors='coerce')
+        data["temp_birthdate"] = data["temp_birthdate"].apply(
+            lambda x: [
+                    convert_if_not_datetime(item)
+                    for item in (x if isinstance(x, list) else [x]) 
+                    if str(item).strip() != ""
+                ]
+        ).copy()
+        #data['temp_birthdate'] = pd.to_datetime(data['temp_birthdate'], errors='coerce')
+        if (verbose):
+            print(data.loc[case_rows,['Level2_FirstDx','temp_birthdate']])
         data.loc[case_rows, 'Level3_Age_FirstDx'] = (data.loc[case_rows].apply(lambda row: 
-            row['Level2_FirstDx'][0] - row['temp_birthdate'], axis=1)).dt.days // 365
+            row['Level2_FirstDx'][0] - row['temp_birthdate'][0], axis=1)).dt.days // 365
     else:
         print("Warning: No cases left (ExDEP_exclusion_interpreter)!")
     if (verbose):
@@ -1833,11 +1735,25 @@ def update_DxDates_ExDEP_multi_exclusion(all_data, exclusion_type, exc_diag, exc
     data = all_data[(all_data[exc_diag] != '') & (all_data['diagnoses'] != "")].copy()
     if len(data) > 0:
         # Split the comma-separated dates in diag_date and convert them to datetime objects
-        data['temp_exc_diag_date'] = data[exc_diag_date].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
+        data["temp_exc_diag_date"] = data[exc_diag_date].apply(
+            lambda x: [
+                    convert_if_not_datetime(item)
+                    for item in (x if isinstance(x, list) else [x]) 
+                    if str(item).strip() != ""
+                ]
+        ).copy()
+        #data['temp_exc_diag_date'] = data[exc_diag_date].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
         # Convert exc_diag string to a list
         data['temp_exc_diag'] = data[exc_diag].copy() #.apply(lambda x: str(x).split(',')).copy()
         # Convert level2dates to a list of datetime objects
-        data['temp_level2dates'] = data[level2dates].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
+        data["temp_level2dates"] = data[level2dates].apply(
+            lambda x: [
+                    convert_if_not_datetime(item)
+                    for item in (x if isinstance(x, list) else [x]) 
+                    if str(item).strip() != ""
+                ]
+        ).copy()
+        #data['temp_level2dates'] = data[level2dates].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
         if (verbose):
             print(data[level2dates])
             print(data['temp_level2dates'])
@@ -1845,7 +1761,14 @@ def update_DxDates_ExDEP_multi_exclusion(all_data, exclusion_type, exc_diag, exc
         # Convert diagnoses string to a list
         data['temp_in_diagnoses'] = data[level2codes].copy() #.apply(lambda x: str(x).split(',')).copy()
         # Convert in_dates string into a list
-        data['temp_original_in_dates'] = data['in_dates'].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
+        data["temp_original_in_dates"] = data['in_dates'].apply(
+            lambda x: [
+                    convert_if_not_datetime(item)
+                    for item in (x if isinstance(x, list) else [x]) 
+                    if str(item).strip() != ""
+                ]
+        ).copy()
+        #data['temp_original_in_dates'] = data['in_dates'].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
         # Convert diagnoses string to a list
         data['temp_original_in_diagnoses'] = data['diagnoses'].copy() #.apply(lambda x: str(x).split(',')).copy()
         print("-----------------------------------------------")
@@ -1958,95 +1881,8 @@ def read_csv_chunk(filename, chunksize, sep):
         chunks.append(chunk)
     return pd.concat(chunks, axis=0)
 
-def parallelize_file_reading(fn,sep,chunksize=10000,num_threads=4):
-    # Use ThreadPoolExecutor to read CSV file with multiple threads
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        futures = [executor.submit(read_csv_chunk, fn, chunksize, sep) for _ in range(num_threads)]
-        results = [future.result() for future in futures]
-    # Concatenate results from different threads
-    final_result = pd.concat(results, axis=0)
-    return final_result
-
-
-# Reformat lists to concatenated strings
-def combine_str_entries(row, col_prefix):
-    if row[f"{col_prefix}"] == '':
-        return ''
-    else:
-        if isinstance(row[f"{col_prefix}"], list) and len(row[f"{col_prefix}"]) > 1:
-            return ','.join(str(entry) for entry in row[f"{col_prefix}"] if entry != "")
-        else:
-            return str(row[f"{col_prefix}"])
-    
-
-def combine_date_entries(row, col_prefix):
-    if row[col_prefix] == '':
-        return row[col_prefix]
-    else:
-        if isinstance(row[col_prefix],tuple) and np.issubdtype(row[col_prefix], np.datetime64):
-            if not isinstance(row[col_prefix].item(), list):
-                try:
-                    return pd.to_datetime(np.datetime_as_string(row[col_prefix], unit='D').item(), format=DateFormat).strftime(DateFormat)
-                except ValueError:
-                    return row[col_prefix]  # Return empty string if conversion fails
-            else:
-                try:
-                    return ','.join(pd.to_datetime(np.datetime_as_string(entry, unit='D').item(), format=DateFormat).strftime(DateFormat) for entry in row[col_prefix])
-                except ValueError:
-                    return row[col_prefix]  # Return empty string if conversion fails
-        elif isinstance(row[col_prefix], object) and isinstance(row[col_prefix], list):
-            try:
-                return ','.join(entry.strftime(DateFormat) if isinstance(entry, datetime) else pd.to_datetime(entry, format=DateFormat).strftime(DateFormat) for entry in row[col_prefix] if hasattr(row[col_prefix], '__iter__'))
-            except ValueError:
-                return row[col_prefix]  # Return empty string if conversion fails
-        elif isinstance(row[col_prefix], datetime):
-            if not isinstance(row[col_prefix], list):
-                try:
-                    return row[col_prefix].strftime(DateFormat)
-                except ValueError:
-                    return row[col_prefix]  # Return empty string if conversion fails
-            else:
-                try:
-                    return ','.join(entry.strftime(DateFormat) for entry in row[col_prefix])
-                except ValueError:
-                    return row[col_prefix]  # Return empty string if conversion fails
-        elif isinstance(row[col_prefix], str):  # Check if row is already a string
-            return row[col_prefix]  # Return empty string if conversion fails
-        else:
-            return str(row[col_prefix])  # Convert to string if not a date object or string
-
-
 from multiprocessing import Pool
 
-def extract_columns(df, pattern):
-    matching_columns = []
-    for column in df.columns:
-        if pattern in column:
-            matching_columns.append(column)
-    return matching_columns
-
-# Custom date parser function
-def custom_date_parser(date_str):
-    global DateFormat
-    if date_str == "I":
-        return "I"
-    else:
-        return pd.to_datetime(date_str, format=DateFormat)
-
-#if (dbds_run):
-        #    #Quality assurance, if the input for diagnostic codes does not contain ICD.
-        #    if(type(in_pheno_codes) == list):
-        #        output_list = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=in_pheno_codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request) 
-        #    else:
-        #        output_list = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=in_pheno_codes[pheno_requestcol], dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request) 
-        #    values_to_match = set(output_list)
-        #elif (ipsych_run):
-        #    #Quality assurance, if the input for diagnostic codes does not contain ICD.
-        #    if(type(in_pheno_codes) == list):
-        #        output_list = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=in_pheno_codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request) 
-        #    else:
-        #        output_list = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=in_pheno_codes[pheno_requestcol], dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request) 
-        #    values_to_match = set(output_list)
 def get_values_to_match(multi_inclusions,in_pheno_codes,pheno_requestcol,remove_point_in_diag_request):
     values_to_match = ""
     if (not multi_inclusions):
@@ -2166,17 +2002,21 @@ def load_lpr_file(lpr_file, dta_input, fsep, lpr_cols_to_read_as_date, DateForma
         if not lpr_cols_to_read_as_date:
                 lpr_cols_to_read_as_date = list(set([col for col in potential_lpr_cols_to_read_as_date if col in df_header]))
                 print("INFO: No cols supplied (lpr) that should be read as dates. Trying to infer them: ",lpr_cols_to_read_as_date)     
-        try:
-            return pd.read_csv(
-                lpr_file, sep=fsep, dtype=object, engine='python',
-                parse_dates=lpr_cols_to_read_as_date, date_format=DateFormat
+        return pd.read_csv(
+                lpr_file, sep=fsep, dtype=object,
+                parse_dates=lpr_cols_to_read_as_date
             )
-        except TypeError as error:
-            print("WARNING: While reading lpr file with added date_format (",str(DateFormat),") information: ",error)
-            df = pd.read_csv(lpr_file, sep=fsep, dtype=object, parse_dates=lpr_cols_to_read_as_date)
-            for col in lpr_cols_to_read_as_date:
-                df[col] = pd.to_datetime(df[col], format=DateFormat, errors='coerce')
-            return df
+        #try:
+        #    return pd.read_csv(
+        #        lpr_file, sep=fsep, dtype=object, engine='python',
+        #        parse_dates=lpr_cols_to_read_as_date, date_format=DateFormat
+        #    )
+        #except TypeError as error:
+        #    print("WARNING: While reading lpr file with added date_format (",str(DateFormat),") information: ",error)
+        #    df = pd.read_csv(lpr_file, sep=fsep, dtype=object, parse_dates=lpr_cols_to_read_as_date)
+        #    for col in lpr_cols_to_read_as_date:
+        #        df[col] = pd.to_datetime(df[col], format=DateFormat, errors='coerce')
+        #    return df
 
 def merge_secondary_diagnoses(df1, df, diagnostic_col, lpr_recnummer, lpr2nd_recnummer, diagnostic2nd_col):
     """
@@ -2190,24 +2030,6 @@ def merge_secondary_diagnoses(df1, df, diagnostic_col, lpr_recnummer, lpr2nd_rec
         df1_temp.loc[df1_temp["c_diagtype"].str.contains("+", na=False), diagnostic_col] = df1_temp["c_tildiag"]
     
     return pd.concat([df1, df1_temp], ignore_index=True, sort=False)
-
-def process_lpr_data_old(lpr_file, lpr2nd_file, dta_input, fsep, lpr_cols_to_read_as_date, DateFormat, potential_lpr_cols_to_read_as_date, diagnostic_col, diagnostic2nd_col, lpr_recnummer, lpr2nd_recnummer):
-    """
-    Process the LPR data, loading primary and optionally merging secondary diagnoses.
-    """
-    file_paths = lpr_file.split(',') if ',' in lpr_file else [lpr_file]
-    df1 = pd.concat([load_lpr_file(fp, dta_input, fsep, lpr_cols_to_read_as_date, DateFormat, potential_lpr_cols_to_read_as_date) for fp in file_paths], ignore_index=True, sort=False)
-   
-    if lpr2nd_file:
-        print("INFO: Removing entries with DZ03* or DZ763 and merging secondary diagnoses.")
-        df1 = df1[~df1[diagnostic_col].str.startswith(('DZ03', 'DZ763'), na=False)]
-        secondary_paths = lpr2nd_file.split(',') if ',' in lpr2nd_file else [lpr2nd_file]
-        
-        for lprfile in secondary_paths:
-            df = load_lpr_file(lprfile, dta_input, fsep, lpr_cols_to_read_as_date, DateFormat, potential_lpr_cols_to_read_as_date)
-            df1 = merge_secondary_diagnoses(df1, df, diagnostic_col, lpr_recnummer, lpr2nd_recnummer, diagnostic2nd_col)
-    
-    return df1
 
 def process_lpr_data(lpr_file, lpr2nd_file, dta_input, fsep, lpr_cols_to_read_as_date, DateFormat, potential_lpr_cols_to_read_as_date, diagnostic_col, diagnostic2nd_col, lpr_recnummer, lpr2nd_recnummer):
     """
@@ -2262,6 +2084,17 @@ def finalize_lpr_data(df1, diagnostic_col, birthdatecol, verbose):
             print("Updated birthdatecol name to 'birthdate'.")
     
     return df1
+
+
+def convert_if_not_datetime(val):
+    # Handle missing values: return NaT for null values
+    if pd.isnull(val):
+        return pd.NaT
+    # If already a pandas Timestamp or a Python datetime/date, just return it
+    if isinstance(val, (pd.Timestamp, datetime, date)):
+        return val
+    # Otherwise, convert using the specified format with error coercion
+    return pd.to_datetime(val, format=DateFormat, errors='coerce')
 
 
 def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl, ctype_incl, Filter_YoB, Filter_Gender, use_predefined_exdep_exclusions, RegisterRun, dst, ipsych_run, dbds_run, cluster_run, exact_match, skip_icd_update, remove_point_in_diag_request, ICDCM, qced_iids, general_exclusions, multi_inclusions, in_pheno_codes, pheno_requestcol, diagnostic_col, atc_diag_col, birthdatecol, atc_date_col, atc_cols_to_read_as_date, atc_file, fsep, BuildEntryExitDates, lifetime_exclusions_file, post_exclusions_file, oneYearPrior_exclusions_file, outfile, write_Plink2_format, write_fastGWA_format, write_pickle, n_stam_iids, exclCHBcontrols, iidstatus_col, addition_information_file, sexcol, input_date_in_name, input_date_out_name, append, df4):
@@ -2414,10 +2247,11 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
             if InclusionReason == 'ATC':
                 print("INFO: Identified that you are running ATC call based on the following Name: ",InclusionReason)
                 if cluster_run == "CHB_DBDS":
-                    try:
-                        atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date, date_format=DateFormat)
-                    except TypeError:
-                        atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
+                    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
+                    #try:
+                    #    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date, date_format=DateFormat)
+                    #except TypeError:
+                    #    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
                     print(atc_df1.columns)
                     if (qced_iids != ""):
                         print(qced_iids_to_keep.head(5))
@@ -2470,10 +2304,9 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         print("ATC_Requested: ",ATC_Requested)
         if ATC_Requested == "All": #Add a global variable used to identify if all, some, or none of the codes are ATC based.
             if cluster_run == "CHB_DBDS":
-                try:
-                    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date, date_format=DateFormat)
-                except TypeError:
-                    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
+                atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
+                #except TypeError:
+                #    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
                 print(atc_df1.columns)
                 if (qced_iids != ""):
                     print(qced_iids_to_keep.head(5))
@@ -2488,10 +2321,9 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
             tmp_cases_df = build_phenotype_cases(atc_df1, exact_match, values_to_match, atc_diag_col, birthdatecol, iidcol, atc_date_col, atc_date_col, verbose)
         elif ATC_Requested == "Some":
             if cluster_run == "CHB_DBDS":
-                try:
-                    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date, date_format=DateFormat)
-                except TypeError:
-                    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
+                atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
+                #except TypeError:
+                #    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
                 if (qced_iids != ""):
                     atc_df1 = atc_df1[atc_df1[iidcol].isin(iids_to_keep[iidcol])]
                 if (general_exclusions != ""):
@@ -2797,10 +2629,16 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     # Calculate the age at first diagnosis
     #age_first_dx = (pd.to_datetime(result_df.loc[case_indices, 'temp_first_dx'], format=DateFormat) - pd.to_datetime(result_df.loc[case_indices, 'temp_birthdate'], format=DateFormat)).dt.days // 365
     try:
-        age_first_dx = (
-            pd.to_datetime(result_df.loc[case_indices, 'temp_first_dx'], format=DateFormat) - 
-            pd.to_datetime(result_df.loc[case_indices, 'temp_birthdate'], format=DateFormat)
-        ).dt.days // 365
+        # Use the helper function to convert each element
+        first_dx_converted = result_df.loc[case_indices, 'temp_first_dx'].apply(convert_if_not_datetime)
+        birthdate_converted = result_df.loc[case_indices, 'temp_birthdate'].apply(convert_if_not_datetime)
+        
+        # Compute age in years (approximate)
+        age_first_dx = (first_dx_converted - birthdate_converted).dt.days // 365
+        #age_first_dx = (
+        #    pd.to_datetime(result_df.loc[case_indices, 'temp_first_dx'], format=DateFormat) - 
+        #    pd.to_datetime(result_df.loc[case_indices, 'temp_birthdate'], format=DateFormat)
+        #).dt.days // 365
     except Exception as e:
         print(f"WARNING while processing date columns: {e}. Attempting to fix formats...")
 
@@ -3089,55 +2927,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         # Subset the DataFrame to the desired columns
         plink2 = final_df[['#FID', 'IID', 'CaseControl']]
         plink2.to_csv(outfile+".plink2.pheno", sep="\t", mode=write_mode, index=False, quoting=False, header=write_header)
-    # if append == False:
-    #     # Compute the result and save it to a new file 
-    #     final_df.to_csv(outfile, sep="\t", index=False, quoting=False)
-    #     reformat_to_tsv(outfile)
-    #     if write_pickle:
-    #         with open(outfile+'.pickle', 'wb') as handle:
-    #             pickle.dump(final_df, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    #     if iidcol != "IID":
-    #         final_df['IID'] = final_df[iidcol].copy
-    #     if write_fastGWA_format:
-    #         # Create the 'FID' and 'IID' columns based on 'IID'
-    #         final_df['FID'] = final_df['IID'].copy
-    #         # Map 'diagnosis' to 'CaseControl'
-    #         final_df['CaseControl'] = final_df['diagnosis'].map({'Case': "1", 'Control': "0", 'Non-case': "0", 'Case_Excluded': "0"})
-    #         # Subset the DataFrame to the desired columns
-    #         fgwa = final_df[['FID', 'IID', 'CaseControl']]
-    #         fgwa.to_csv(outfile+".fgwa.pheno", sep="\t", index=False, quoting=False)
-    #     if write_Plink2_format:
-    #         # Create the 'FID' and 'IID' columns based on 'IID'
-    #         final_df['#FID'] = final_df['IID'].copy
-    #         # Map 'diagnosis' to 'CaseControl'
-    #         final_df['CaseControl'] = final_df['diagnosis'].map({'Case': "2", 'Control': "1", 'Non-case': "1", 'Case_Excluded': "1"})
-    #         # Subset the DataFrame to the desired columns
-    #         plink2 = final_df[['#FID', 'IID', 'CaseControl']]
-    #         plink2.to_csv(outfile+".plink2.pheno", sep="\t", index=False, quoting=False)
-    # else:
-    #     # Compute the result and save it to a new file 
-    #     final_df.to_csv(outfile, sep="\t", index=False, quoting=False, mode='a', header=False)
-    #     reformat_to_tsv(outfile)
-    #     if write_pickle:
-    #         print("ERROR: writing pickle is not implemented for --lowmem.")
-    #     if iidcol != "IID":
-    #         final_df['IID'] = final_df[iidcol].copy
-    #     if write_fastGWA_format:
-    #         # Create the 'FID' and 'IID' columns based on 'IID'
-    #         final_df['FID'] = final_df['IID'].copy
-    #         # Map 'diagnosis' to 'CaseControl'
-    #         final_df['CaseControl'] = final_df['diagnosis'].map({'Case': "1", 'Control': "0", 'Non-case': "0", 'Case_Excluded': "0"})
-    #         # Subset the DataFrame to the desired columns
-    #         fgwa = final_df[['FID', 'IID', 'CaseControl']]
-    #         fgwa.to_csv(outfile+".fgwa.pheno", sep="\t", index=False, quoting=False, mode='a', header=False)
-    #     if write_Plink2_format:
-    #         # Create the 'FID' and 'IID' columns based on 'IID'
-    #         final_df['#FID'] = final_df['IID']
-    #         # Map 'diagnosis' to 'CaseControl'
-    #         final_df['CaseControl'] = final_df['diagnosis'].map({'Case': "2", 'Control': "1", 'Non-case': "1", 'Case_Excluded': "1"})
-    #         # Subset the DataFrame to the desired columns
-    #         plink2 = final_df[['#FID', 'IID', 'CaseControl']]
-    #         plink2.to_csv(outfile+".plink2.pheno", sep="\t", index=False, quoting=False, mode='a', header=False)
+    
 
 #TODO: Update to be more efficient and to use the new lpr_load functions
 def batch_load_lprfile(df, lprfile, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose):
@@ -3165,7 +2955,7 @@ def batch_load_lprfile(df, lprfile, iidcol, iid_batch, batch_num, fsep, potentia
     del df_header
     if available_date_cols:
         try:
-            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, engine='python', parse_dates=available_date_cols, date_format=DateFormat)
+            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, parse_dates=available_date_cols)
             if verbose:
                 print(f"Finished loading chunk {batch_num}. Appending it now to the dataframe (as multiple lpr files were supplied).")
             df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
@@ -3173,20 +2963,21 @@ def batch_load_lprfile(df, lprfile, iidcol, iid_batch, batch_num, fsep, potentia
             filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, engine='python', parse_dates=available_date_cols)
             if verbose:
                 print(f"Finished loading chunk {batch_num}. (Within TypeError) Updating the dateformat and appending it to the dataframe (as multiple lpr files were supplied).")
-            for col in available_date_cols:
-                filtered_chunk[col] = pd.to_datetime(filtered_chunk[col], format=DateFormat, errors='coerce')
             df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
         except ValueError:
-            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, engine='python')
+            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object)
             if verbose:
                 print(f"Finished loading chunk {batch_num}. (Within ValueError) Updating the dateformat and appending it to the dataframe (as multiple lpr files were supplied).")
             for col in available_date_cols:
                 if col in filtered_chunk.columns:
-                    filtered_chunk[col] = pd.to_datetime(filtered_chunk[col], format=DateFormat, errors='coerce')
+                    filtered_chunk[col] = filtered_chunk[col].apply(lambda x: convert_if_not_datetime(x) if pd.notnull(x) else pd.NaT) #filtered_chunk[col] = pd.to_datetime(filtered_chunk[col], format=DateFormat, errors='coerce')
             df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
         #gc.collect()
     else:
-        filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=str)
+        try:#NEW 26.02.2025
+            filtered_chunk = pd.read_csv(lprfile, sep=fsep)
+        except ValueError:    
+            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=str)
         if verbose:
             print(f"Finished loading chunk {batch_num}. (Within else) Appending it to the dataframe (as multiple lpr files were supplied).")
         df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
@@ -3268,7 +3059,6 @@ def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic
                 del filtered_chunk
                 gc.collect()
             else:
-                #df1 = batch_load_lprfile(df1, lpr_file, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose)
                 df1 = batch_load_lprfile(df1, lpr_file, lpr2nd_file, lpr2nd_recnummer, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose)
                 #TODO: Add the check if lpr2nd_file is a list or a single file.
         if lpr2nd_file != "" and recnums_to_keep:
@@ -3636,7 +3426,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         df3 = pd.DataFrame() #stam file
         df4 = pd.DataFrame() #additional information file
         # Load input files
-        casecontrol_df = pd.read_csv(pheno_request, sep=fsep, dtype=object, parse_dates=lpr_cols_to_read_as_date, date_format=DateFormat)
+        casecontrol_df = pd.read_csv(pheno_request, sep=fsep, dtype=object, parse_dates=lpr_cols_to_read_as_date)
         print("#"*50)
         print("#"*50)
         print("INFO: You are loading pre-created phenotype files to then let us do some manipulation and combining them.")
@@ -3647,6 +3437,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         print("DISORDERNAME /path/to/file/for/DISORDERNAME")
         print("#"*50)
         print("#"*50)
+        #TODO: add all options and integrate them into the workflow
         if lifetime_exclusions_file != "":
             if ',' in lifetime_exclusions_file:
                 # Split the string by comma
@@ -3662,7 +3453,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 temp_df = pd.DataFrame()
                 # Iterate over each file path
                 for lifetimefile in file_paths:
-                    temp_df = pd.read_csv(lifetimefile, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date, date_format=DateFormat)
+                    temp_df = pd.read_csv(lifetimefile, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date)
                     # update the colnames so that the current disorder/disease will be reflected in the naming as it would be when running it from the start
                     # append the casecontrol_df with the current exclusion
 
@@ -3833,34 +3624,31 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 if dta_input:
                     df = pd.read_stata(stamfile)
                 else:
+                    # Identify the set of columns that are dates
+                    try:
+                        df = pd.read_csv(stamfile, sep=fsep, dtype=object, nrows=0)
+                    except TypeError:
+                        df = pd.read_csv(stamfile, sep=fsep, dtype=object, nrows=0, engine='python')
+                    if(df.columns.empty):
+                        print("ERROR: Could not load -i file: ",stamfile)
+                        sys.exit()
                     if stam_cols_to_read_as_date:
-                        try:
-                            df = pd.read_csv(stamfile, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date, date_format=DateFormat)
-                        except TypeError:
-                            df = pd.read_csv(stamfile, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date)
-                            for col in stam_cols_to_read_as_date:
-                                df[col] = pd.to_datetime(df[col], format=DateFormat, errors='coerce')
+                        stam_cols_to_read_as_date = list(set([col for col in stam_cols_to_read_as_date if col in df.columns]))
+                    if not stam_cols_to_read_as_date:
+                        stam_cols_to_read_as_date = list(set([col for col in potential_stam_cols_to_read_as_date if col in df.columns]))
+                    if stam_cols_to_read_as_date:
+                        df = pd.read_csv(stamfile, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date)
+                        #try:
+                        #    df = pd.read_csv(stamfile, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date, date_format=DateFormat)
+                        #except TypeError:
+                        #    df = pd.read_csv(stamfile, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date)
+                        #    for col in stam_cols_to_read_as_date:
+                        #        df[col] = df[col].apply(lambda x: convert_if_not_datetime(x) if pd.notnull(x) else pd.NaT) #df[col] = pd.to_datetime(df[col], format=DateFormat, errors='coerce')
                     else:
-                        # Identify the set of columns that are dates
                         try:
-                            df = pd.read_csv(stamfile, sep=fsep, dtype=object, nrows=0)
+                            df = pd.read_csv(stamfile, sep=fsep, dtype=str)
                         except TypeError:
-                            df = pd.read_csv(stamfile, sep=fsep, dtype=object, nrows=0, engine='python')
-                        if(df.columns.empty):
-                            print("ERROR: Could not load -i file: ",stamfile)
-                            sys.exit()
-                        available_date_cols = list(set([col for col in potential_stam_cols_to_read_as_date if col in df.columns]))
-                        print("INFO: No cols supplied (stam) that should be read as dates. Trying to infer them: ",available_date_cols)
-                        if available_date_cols:
-                            try:
-                                df = pd.read_csv(stamfile, sep=fsep, dtype=object, parse_dates=available_date_cols, date_format=DateFormat)
-                            except TypeError:
-                                df = pd.read_csv(stamfile, sep=fsep, dtype=object, parse_dates=available_date_cols)
-                        else:
-                            try:
-                                df = pd.read_csv(stamfile, sep=fsep, dtype=str)
-                            except TypeError:
-                                df = pd.read_csv(stamfile, sep=fsep, engine='python', dtype=str)
+                            df = pd.read_csv(stamfile, sep=fsep, engine='python', dtype=str)
                 df3 = pd.concat([df3, df], ignore_index=True, sort=False)
                 del(df)
             del(stamfile)
@@ -3871,10 +3659,11 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 df3 = pd.read_stata(stam_file)
             else:
                 if stam_cols_to_read_as_date:
-                    try:
-                        df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date, date_format=DateFormat)
-                    except TypeError:
-                        df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date)
+                    df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date)
+                    #try:
+                    #    df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date, date_format=DateFormat)
+                    #except TypeError:
+                    #    df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date)
                 else:
                     # Identify the set of columns that are dates
                     try:
@@ -3895,7 +3684,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                             
                         # Ensure correct date format after reading
                         for col in available_date_cols:
-                            df3[col] = pd.to_datetime(df3[col], errors='coerce', format=DateFormat)
+                            df3[col] = df3[col].apply(lambda x: convert_if_not_datetime(x) if pd.notnull(x) else pd.NaT) #df3[col] = pd.to_datetime(df3[col], errors='coerce', format=DateFormat)
                     else:
                         try:
                             df3 = pd.read_csv(stam_file, sep=fsep, dtype=str)
@@ -4041,7 +3830,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 bul_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=BUL_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
                 ano_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=ANO_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
                 anx_diagnostics = update_icd_coding(dst=dst, RegisterRun=RegisterRun, data=ANX_Codes, dbdschb=dbds_run, ipsych=ipsych_run, eM=exact_match, skip=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, noLeadingICD=noLeadingICD) 
-            
+
         if not lowMem:
             df1 = process_lpr_data(
                 lpr_file, lpr2nd_file, dta_input, fsep, lpr_cols_to_read_as_date, 

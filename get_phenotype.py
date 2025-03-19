@@ -23,6 +23,7 @@ python_min_version = "3.8.1"
 pd_min_version = "1.3.4"
 DateFormat = "%Y-%m-%d"
 ATC_Requested = "NotSet"
+DayFirst = False
 
 #################################################################
 #===============================================================#
@@ -664,8 +665,264 @@ def usage():
     mem_used = process.memory_info()[0] / float(1024 * 1024 * 1024) #2 ** 20)
     print("Memory usage in GB: "+str(mem_used))
 
-def update_icd_coding(data, dst=False, dbdschb=False, ipsych=False, eM=False, skip=False, remove_point_in_diag_request=False, ICDCM=False, RegisterRun=False, no_Fill=False, noLeadingICD=False):
-    remove_leading_ICD = not noLeadingICD
+def remove_leading_icd(entry):
+    """If the entry starts with any known ICD prefix, remove it once."""
+    prefixes = ['ICD10:', 'ICD10-CM:', 'ICD9:', 'ICD9-CM:', 'ICD8:']
+    if isinstance(entry, str):
+        for prefix in prefixes:
+            if entry.startswith(prefix):
+                return entry[len(prefix):]
+    return entry
+
+def format_numeric(entry, remove_leading, eM, prefix='ICD8:'):
+    """Formats a numeric entry as an ICD8 code."""
+    entry_str = str(entry)
+    integer_part, sep, decimal_part = entry_str.partition('.')
+    integer_part = integer_part.zfill(3)
+    # Only pad the decimal part if present and eM is true
+    decimal_formatted = decimal_part.zfill(2) if eM and decimal_part else decimal_part
+    result = f"{integer_part}.{decimal_formatted}"
+    if not remove_leading:
+        result = prefix + result
+    return result
+
+def process_icd8(entry, remove_leading, eM):
+    """Processes an ICD8 entry."""
+    if isinstance(entry, str):
+        entry = entry.replace('ICD8:', '', 1) if remove_leading else entry
+    return format_numeric(entry, remove_leading, eM, prefix='ICD8:')
+
+def process_icd9_cm(entry, remove_leading):
+    """Processes an ICD9-CM entry."""
+    entry_str = entry.replace('ICD9-CM:', '', 1).upper()
+    return entry_str if remove_leading else 'ICD9:' + entry_str
+
+def process_icd10_cm(entry, remove_leading):
+    """Processes an ICD10-CM entry."""
+    entry_str = entry.replace('ICD10-CM:', '', 1).upper()
+    return entry_str if remove_leading else 'ICD10:' + entry_str
+
+def process_entry_icdcm(entry, remove_leading, eM):
+    """Processing branch for ICDCM (ICD10CM without dbdschb, ipsych, dst)."""
+    if isinstance(entry, str):
+        if entry.startswith('ATC:'):
+            return entry
+        elif entry.startswith('ICD8:'):
+            return process_icd8(entry, remove_leading, eM)
+        elif entry.startswith('ICD9-CM:'):
+            return process_icd9_cm(entry, remove_leading)
+        elif entry.startswith('ICD10-CM:'):
+            return process_icd10_cm(entry, remove_leading)
+    if isinstance(entry, (int, float)) and str(entry).isdigit():
+        return format_numeric(entry, remove_leading, eM, prefix='ICD8:')
+    return entry
+
+def process_entry_dbds(entry, remove_leading, eM):
+    """Processing branch for DBDS/CHB data."""
+    if isinstance(entry, str):
+        if entry.startswith('ATC:'):
+            return entry.replace('ATC:', '', 1).upper()
+        elif entry.startswith(('ICD9-CM:', 'ICD10-CM:', 'ICD9:')):
+            return None  # Skip this entry
+        elif entry.startswith('ICD8:'):
+            # Convert to uppercase and format
+            entry_str = entry.upper()
+            integer_part, _, decimal_part = entry_str.partition('.')
+            integer_part = integer_part.zfill(3)
+            return f"{integer_part}.{decimal_part.zfill(2) if eM and decimal_part else decimal_part}"
+        elif not str(entry).isdigit() and not entry.startswith(('ICD10:', 'ICD10:D')):
+            if re.match(r'^[A-Z]{2}\d', entry, re.IGNORECASE):
+                return 'ICD10:' + entry.upper()
+            elif re.match(r'^[A-Z]\d', entry, re.IGNORECASE):
+                return 'ICD10:D' + entry.upper()
+            else:
+                print(f"{entry} has more than two letters before a numeric value. Leaving as is.")
+                return entry
+        elif entry.startswith('ICD10:') and not entry.startswith('ICD10:D'):
+            return 'ICD10:D' + entry.replace('ICD10:', '', 1).upper()
+        elif entry.startswith('ICD10:D'):
+            return 'ICD10:' + entry.replace('ICD10:', '', 1).upper()
+    if isinstance(entry, (int, float)) and str(entry).isdigit():
+        return format_numeric(entry, remove_leading, eM, prefix='ICD8:')
+    return entry.replace('.', '') if isinstance(entry, str) else entry
+
+def process_entry_register(entry, remove_leading, eM):
+    """Processing branch for RegisterRun."""
+    if isinstance(entry, str):
+        if entry.startswith('ATC:'):
+            return entry
+        elif entry.startswith(('ICD9-CM:', 'ICD10-CM:')):
+            return None
+        elif entry.startswith('ICD8:'):
+            new_entry = entry.replace('ICD8:', '', 1)
+            return process_icd8(new_entry, True, eM)
+        elif entry.startswith('ICD9:') and not entry.startswith('ICD9-CM:'):
+            return None
+        elif not str(entry).isdigit() and not entry.startswith(('ICD10:', 'ICD10:D')):
+            if re.match(r'^[A-Z]{2}\d', entry, re.IGNORECASE):
+                return entry.upper()
+            elif re.match(r'^[A-Z]\d', entry, re.IGNORECASE):
+                return 'D' + entry.upper()
+            else:
+                print(f"{entry} has more than two letters before a numeric value. Leaving as is.")
+                return entry
+        elif entry.startswith('ICD10:') and not entry.startswith(('ICD10:D', 'ICD10-CM:')):
+            return 'D' + entry.replace('ICD10:', '', 1).upper()
+        elif not entry.startswith('ICD10:') and entry.startswith('ICD10:D') and not entry.startswith('ICD10-CM:'):
+            return entry.replace('ICD10:', '', 1).upper()
+    if isinstance(entry, (int, float)) and str(entry).isdigit():
+        new_entry = format_numeric(entry, remove_leading, eM, prefix='ICD8:')
+        return new_entry.replace('.', '')
+    return entry
+
+def process_entry_ipsych(entry, remove_leading, eM):
+    """Processing branch for ipsych or dst."""
+    if isinstance(entry, str):
+        if entry.startswith('ATC:'):
+            return entry
+        elif entry.startswith(('ICD9-CM:', 'ICD10-CM:')):
+            return None
+        elif entry.startswith('ICD8:'):
+            new_entry = entry.replace('ICD8:', '', 1)
+            return process_icd8(new_entry, True, eM)
+        elif entry.startswith('ICD9:') and not entry.startswith('ICD9-CM:'):
+            return None
+        elif not str(entry).isdigit() and not entry.startswith(('ICD10:', 'ICD10:D')):
+            # Use regex to decide whether to add a D prefix or not
+            if re.match(r'^[A-Z]{2}\d', entry, re.IGNORECASE):
+                result = entry.upper()
+            elif re.match(r'^[A-Z]\d', entry, re.IGNORECASE):
+                result = 'D' + entry.upper()
+            else:
+                print(f"{entry} has more than two letters before a numeric value. Leaving as is.")
+                result = entry
+            # Assumes split_and_format is defined elsewhere
+            return split_and_format(result, fill=eM)
+        elif entry.startswith('ICD10:') and not str(entry).isdigit():
+            if re.match(r'^ICD10:D[A-Z]\d+', entry, re.IGNORECASE):
+                result = entry.replace('ICD10:D', '', 1).upper()
+            elif re.match(r'^ICD10:[A-Z]\d+', entry, re.IGNORECASE):
+                result = 'D' + entry.replace('ICD10:', '', 1).upper()
+            else:
+                print(f"{entry} has more than two letters before a numeric value. Leaving as is.")
+                result = entry
+            return split_and_format(result, fill=eM)
+    if isinstance(entry, (int, float)) and str(entry).isdigit():
+        return format_numeric(entry, remove_leading, eM, prefix='ICD8:')
+    return entry.replace('.', '') if isinstance(entry, str) else entry
+
+def process_entry_default(entry, remove_leading, eM, remove_point, RegisterRun):
+    """Default processing branch."""
+    if isinstance(entry, str):
+        if entry.upper().startswith('ATC:'):
+            result = entry
+        elif entry.upper().startswith('ICD8'):
+            result = entry.replace('ICD8:', '', 1) if remove_leading else entry
+        elif entry.upper().startswith('ICD9'):
+            result = entry.replace('ICD9:', '', 1) if remove_leading else entry
+        elif entry.upper().startswith('ICD10'):
+            result = entry.replace('ICD10:', '', 1) if remove_leading else entry
+        elif entry.upper().startswith('ICD9-CM'):
+            result = entry.replace('ICD9-CM:', '', 1) if remove_leading else entry
+        elif entry.upper().startswith('ICD10-CM'):
+            result = entry.replace('ICD10-CM:', '', 1) if remove_leading else entry
+        elif entry.upper().startswith('ICD9CM'):
+            result = entry.replace('ICD9CM:', '', 1) if remove_leading else entry
+        elif entry.upper().startswith('ICD10CM'):
+            result = entry.replace('ICD10CM:', '', 1) if remove_leading else entry
+        else:
+            result = entry
+    else:
+        result = entry
+    if isinstance(result, (int, float)) and str(result).isdigit():
+        result = result
+    if remove_point or RegisterRun:
+        if isinstance(result, str):
+            result = result.replace('.', '')
+    return result
+
+def update_icd_coding(data, dst=False, dbdschb=False, ipsych=False, eM=False,
+                      skip=False, remove_point_in_diag_request=False,
+                      ICDCM=False, RegisterRun=False, no_Fill=False, noLeadingICD=False):
+    if skip:
+        return data
+    output_list = []
+    # (ATC_Requested is assumed to be a global variable defined elsewhere)
+    global ATC_Requested
+    print_which_section = True
+
+    # Ensure data is a list
+    if not isinstance(data, list):
+        data = data[data.columns[0]].values.tolist()
+
+    # Decide which processing mode to use
+    if ICDCM and not dbdschb and not ipsych and not dst:
+        mode = 'ICDCM'
+        if print_which_section:
+            print("In ICD10CM ICDupdate")
+            print_which_section = False
+    elif dbdschb:
+        mode = 'DBDS'
+        if print_which_section:
+            print("In DBDS ICDupdate")
+            print_which_section = False
+    elif RegisterRun:
+        mode = 'RegisterRun'
+        if print_which_section:
+            print("RegisterRun: focusing on ICD10 and ICD8 input data")
+            print_which_section = False
+    elif ipsych or dst:
+        mode = 'IPSYCH'
+        if print_which_section:
+            print("In ipsych or dst ICDupdate")
+            print_which_section = False
+    else:
+        mode = 'default'
+        if print_which_section:
+            print("In ELSE ICDupdate")
+            print_which_section = False
+
+    for entry in data:
+        skipEntry = False
+        if mode == 'ICDCM':
+            entry = process_entry_icdcm(entry, noLeadingICD, eM)
+        elif mode == 'DBDS':
+            new_entry = process_entry_dbds(entry, noLeadingICD, eM)
+            if new_entry is None:
+                skipEntry = True
+            else:
+                entry = new_entry
+        elif mode == 'RegisterRun':
+            new_entry = process_entry_register(entry, noLeadingICD, eM)
+            if new_entry is None:
+                skipEntry = True
+            else:
+                entry = new_entry
+        elif mode == 'IPSYCH':
+            new_entry = process_entry_ipsych(entry, noLeadingICD, eM)
+            if new_entry is None:
+                skipEntry = True
+            else:
+                entry = new_entry
+        else:
+            entry = process_entry_default(entry, noLeadingICD, eM,
+                                          remove_point_in_diag_request, RegisterRun)
+
+        # Final pass to remove any leading ICD prefixes if requested
+        if noLeadingICD and isinstance(entry, str):
+            entry = remove_leading_icd(entry)
+        if not skipEntry:
+            output_list.append(entry)
+        # For DBDS or ipsych modes, remove any -CM entries
+        if dbdschb or ipsych:
+            output_list = [entry for entry in output_list 
+                           if not (isinstance(entry, str) and (entry.startswith('ICD10-CM:') or entry.startswith('ICD9-CM:')))]
+    print(f"Final updated ICD codes: {output_list}")
+    # (Warnings about unknown systems or numeric ambiguity can be added here as needed.)
+    return output_list
+
+def update_icd_coding_old(data, dst=False, dbdschb=False, ipsych=False, eM=False, skip=False, remove_point_in_diag_request=False, ICDCM=False, RegisterRun=False, no_Fill=False, noLeadingICD=False):
+    remove_leading_ICD =  noLeadingICD
     if (not skip):
         output_list = []
         updateICD9 = False
@@ -879,9 +1136,16 @@ def update_icd_coding(data, dst=False, dbdschb=False, ipsych=False, eM=False, sk
                 if remove_point_in_diag_request or RegisterRun:
                     entry = str(entry).replace('.', '')  # remove '.' from the entry
             if noLeadingICD:
+                print("Removing ")
                 prefixes = ['ICD10:', 'ICD10-CM:', 'ICD9:', 'ICD9-CM:', 'ICD8:']
                 for prefix in prefixes:
-                    entry = str(entry).replace(prefix, '')
+                    # Check if entry starts with the prefix
+                    if str(entry).startswith(prefix):
+                        entry = str(entry)[len(prefix):]
+                        break  # Exit loop after the first matching prefix is removedif noLeadingICD:
+                #prefixes = ['ICD10:', 'ICD10-CM:', 'ICD9:', 'ICD9-CM:', 'ICD8:']
+                #for prefix in prefixes:
+                #    entry = str(entry).replace(prefix, '')
             if (not skipEntry):
                 output_list.append(entry)
             if(dbdschb or ipsych):
@@ -992,24 +1256,12 @@ def build_phenotype_cases(df1, exact_match, values_to_match, diagnostic_col, bir
             sys.exit()
     if Covariates == False:
         print("Identified initially ",str(tmp_result_df[iidcol].nunique())," IIDs that do have an overlapping diagnostic code.")
-    # Build the Entry and Exit date based on first and last Entry
-    if (BuildEntryExitDates):
-        print("Estimating the Entry and Exit date for Cases based on the first and last available diagnosis (not specific to the currently requested diagnosis codes, but generally available data).")
-        iid_list_cases = tmp_result_df[iidcol]
-        tmp_cases_entry_exit_df = df1[df1[iidcol].isin(iid_list_cases)].copy()
-        cols_to_delete = tmp_cases_entry_exit_df.columns.tolist()  # Convert Index object to list
-        cols_to_delete.remove(iidcol)  # Remove 'iidcol' from the list of columns
-        cols_to_delete.remove(input_date_in_name)
-        cols_to_delete.remove(input_date_out_name)
-        tmp_cases_entry_exit_df.drop(cols_to_delete, inplace=True, axis=1) 
-        grouped = tmp_cases_entry_exit_df.groupby([iidcol],group_keys=False) 
-        in_dates = grouped[input_date_in_name].min().reset_index(name='Entry_Date')
-        if (input_date_out_name != input_date_in_name):
-            out_dates = grouped[input_date_out_name].max().reset_index(name='Exit_Date')
-        else:
-            out_dates = grouped[input_date_in_name].max().reset_index(name='Exit_Date')
-        Entry_Exit_date_df = in_dates.merge(out_dates, on=iidcol)
-        tmp_result_df = tmp_result_df.merge(Entry_Exit_date_df, on=iidcol)
+    if input_date_in_name in tmp_result_df.columns:
+        tmp_result_df[input_date_in_name] = tmp_result_df[input_date_in_name].apply(lambda x: convert_if_not_datetime(x) if pd.notnull(x) else pd.NaT)
+    if input_date_out_name in tmp_result_df.columns:
+        tmp_result_df[input_date_out_name] = tmp_result_df[input_date_out_name].apply(lambda x: convert_if_not_datetime(x) if pd.notnull(x) else pd.NaT)
+    if birthdatecol in tmp_result_df.columns:
+        tmp_result_df[birthdatecol] = tmp_result_df[birthdatecol].apply(lambda x: convert_if_not_datetime(x) if pd.notnull(x) else pd.NaT) 
     if Covariates == False:
         return merge_IIDs(tmp_result_df, diagnostic_col, birthdatecol, input_date_in_name, input_date_out_name, iidcol, verbose, Cases=True, Covariates=Covariates, BuildEntryExitDates=BuildEntryExitDates)
     else:
@@ -1101,43 +1353,6 @@ def merge_IIDs(tmp_result_df, diagnostic_col, birthdatecol, input_date_in_name, 
         print("Mem after updating tmp_result_df and tmp_controls_df:")
         usage()
         print(tmp_result_df.columns)
-    #Build the First entry and last entry for all individuals (i.e., Cases+Controls)
-    if (BuildEntryExitDates):
-        print("Estimating the Entry and Exit date for Individuals based on the first and last available diagnosis (not specific to the currently requested diagnosis codes, but generally available data).")
-        iid_list_cases = tmp_result_df[iidcol]
-        tmp_entry_exit_df = tmp_result_df[tmp_result_df[iidcol].isin(iid_list_cases)].copy()
-        cols_to_delete = tmp_entry_exit_df.columns.tolist()  # Convert Index object to list
-        if (verbose):
-            print("Columns in tmp_entry_exit_df: ",cols_to_delete)
-        if ( not input_date_in_name in cols_to_delete ):
-            if ("date_in" in cols_to_delete):
-                input_date_in_name = "date_in"
-        if ( not input_date_out_name in cols_to_delete ):
-            if ("date_out" in cols_to_delete):
-                input_date_out_name = "date_out"
-
-        cols_to_delete.remove(iidcol)  # Remove 'iidcol' from the list of columns
-        if (input_date_in_name in cols_to_delete):
-            cols_to_delete.remove(input_date_in_name)
-        if (input_date_out_name in cols_to_delete):
-            cols_to_delete.remove(input_date_out_name)
-        print(tmp_entry_exit_df)
-        tmp_entry_exit_df.drop(cols_to_delete, inplace=True, axis=1) 
-        print(tmp_entry_exit_df)
-        grouped = tmp_entry_exit_df.groupby([iidcol],group_keys=False) 
-        print(grouped)
-        in_dates = grouped[input_date_in_name].min().reset_index(name='Entry_Date')
-        print(in_dates)
-        #in_dates.rename(columns={input_date_in_name: 'Entry_Date'})
-        if (input_date_out_name != input_date_in_name):
-            out_dates = grouped[input_date_out_name].max().reset_index(name='Exit_Date')
-            print(out_dates)
-            #out_dates.rename(columns={input_date_out_name: 'Exit_Date'})
-        else:
-            out_dates = grouped[input_date_in_name].max().reset_index(name='Exit_Date')
-            #out_dates.rename(columns={input_date_in_name: 'Exit_Date'})
-        Entry_Exit_date_df = in_dates.merge(out_dates, on=iidcol)
-        print(Entry_Exit_date_df)
     # Add first/last diagnosis date, with date_out as the last diagnosis date 
     grouped = tmp_result_df.groupby([iidcol],group_keys=False) # Group by ID, then extract the first and last dates for each group
     if (verbose):
@@ -1495,7 +1710,6 @@ def Exclusion_interpreter(data, excl, type, min_Age, max_Age, exclnumber, verbos
             if str(item).strip() != ""
         ]
     ).copy()
-    #data['temp_Level2_dates'] = data['Level2_dates'].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
     if (verbose):
         print("temp_Level2_dates: ",data.loc[(data['diagnosis'] == "Case"),'temp_Level2_dates'])
     case_rows = data['temp_Level2_dates'].apply(lambda x: len(x) > 0 if isinstance(x, list) else False)
@@ -1509,7 +1723,6 @@ def Exclusion_interpreter(data, excl, type, min_Age, max_Age, exclnumber, verbos
         data.loc[case_rows, "Level2_FirstDx"] = data.loc[case_rows, ["Level2_FirstDx", "temp_Level2_dates"]].apply(lambda row: [min(row["Level2_FirstDx"] + row["temp_Level2_dates"])] if (row["Level2_FirstDx"] + row["temp_Level2_dates"]) else [], axis=1)
         if (verbose):
             print(data.loc[case_rows,['Level2_FirstDx','temp_birthdate']])
-        #data.loc[case_rows, "Level2_FirstDx"] = data.loc[case_rows, "Level2_FirstDx"] + data.loc[case_rows, "temp_Level2_dates"].apply(lambda x: [min(x)] if x else [])
         # Recalculate age at first Diagnosis
         if (verbose):
             print(data.loc[case_rows])
@@ -1559,7 +1772,7 @@ def ExDEP_exclusion_interpreter(data, min_Age, max_Age, verbose):
     data['disorder_Level2_modifier'] = [[] for _ in range(len(data))]
     data['date_Level2_modifier'] = [[] for _ in range(len(data))]
     data['Level2_diagnoses'] = data['diagnoses']
-    data['Level2_dates'] = data['in_dates'] #data['in_dates']
+    data['Level2_dates'] = data['in_dates'] 
     data['Level2_AgeExclusion'] = "FALSE"
     data['Level2_ExclusionReason'] = [[] for _ in range(len(data))]
     data['Level2_FirstDx'] = [[] for _ in range(len(data))]
@@ -1625,12 +1838,10 @@ def ExDEP_exclusion_interpreter(data, min_Age, max_Age, verbose):
             if str(item).strip() != ""
         ]
     ).copy()
-    #data['temp_Level2_dates'] = data['Level2_dates'].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
     case_rows = data['Level2_dates'].apply(lambda x: len(x) > 0)
     data['temp_birthdate'] = data['birthdate']
     if (len(data.loc[case_rows])>0):
         data.loc[case_rows, "Level2_FirstDx"] = data.loc[case_rows, ["Level2_FirstDx", "temp_Level2_dates"]].apply(lambda row: [min(row["Level2_FirstDx"] + row["temp_Level2_dates"])] if (row["Level2_FirstDx"] + row["temp_Level2_dates"]) else [], axis=1)
-        #data.loc[case_rows, "Level2_FirstDx"] = data.loc[case_rows, "Level2_FirstDx"] + data.loc[case_rows, "temp_Level2_dates"].apply(lambda x: [min(x)] if x else [])
         # Recalculate age at first Diagnosis
         if (verbose):
             print(data.loc[case_rows])
@@ -1643,7 +1854,6 @@ def ExDEP_exclusion_interpreter(data, min_Age, max_Age, verbose):
                     if str(item).strip() != ""
                 ]
         ).copy()
-        #data['temp_birthdate'] = pd.to_datetime(data['temp_birthdate'], errors='coerce')
         if (verbose):
             print(data.loc[case_rows,['Level2_FirstDx','temp_birthdate']])
         data.loc[case_rows, 'Level3_Age_FirstDx'] = (data.loc[case_rows].apply(lambda row: 
@@ -1701,8 +1911,10 @@ def build_ExDEP_exclusions(casecontrol_df, df1, diagnostic_col, iidcol, birthdat
         # filtered_df = build_phenotype_cases(df1, exact_match, diag_df, diagnostic_col)[[iidcol, diagnostic_col, "date_in"]]
         update_diag_col_name_to_diag = True
     if (verbose):
-        print(filtered_df.head(5))
+        print(f"filtered_df.head(5): {filtered_df.head(5)}")
     print("Identified ",filtered_df.shape[0]," Cases for",diag)
+    if casecontrol_df.empty:
+        casecontrol_df = df1[[iidcol]].drop_duplicates()
     if not filtered_df.empty:
         filtered_df.rename(columns={"diagnoses":diag},inplace=True)
         filtered_df.rename(columns={"in_dates":diag+"_In_Dates"},inplace=True)
@@ -1742,9 +1954,8 @@ def update_DxDates_ExDEP_multi_exclusion(all_data, exclusion_type, exc_diag, exc
                     if str(item).strip() != ""
                 ]
         ).copy()
-        #data['temp_exc_diag_date'] = data[exc_diag_date].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
         # Convert exc_diag string to a list
-        data['temp_exc_diag'] = data[exc_diag].copy() #.apply(lambda x: str(x).split(',')).copy()
+        data['temp_exc_diag'] = data[exc_diag].copy() 
         # Convert level2dates to a list of datetime objects
         data["temp_level2dates"] = data[level2dates].apply(
             lambda x: [
@@ -1753,13 +1964,12 @@ def update_DxDates_ExDEP_multi_exclusion(all_data, exclusion_type, exc_diag, exc
                     if str(item).strip() != ""
                 ]
         ).copy()
-        #data['temp_level2dates'] = data[level2dates].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
         if (verbose):
             print(data[level2dates])
             print(data['temp_level2dates'])
             print(data['diagnoses'])
         # Convert diagnoses string to a list
-        data['temp_in_diagnoses'] = data[level2codes].copy() #.apply(lambda x: str(x).split(',')).copy()
+        data['temp_in_diagnoses'] = data[level2codes].copy() 
         # Convert in_dates string into a list
         data["temp_original_in_dates"] = data['in_dates'].apply(
             lambda x: [
@@ -1768,7 +1978,9 @@ def update_DxDates_ExDEP_multi_exclusion(all_data, exclusion_type, exc_diag, exc
                     if str(item).strip() != ""
                 ]
         ).copy()
-        #data['temp_original_in_dates'] = data['in_dates'].apply(lambda x: [pd.to_datetime(date, format=DateFormat) for date in (x if isinstance(x, list) else [x]) if str(date).strip() != '']).copy()
+        if (verbose):
+            print(f"data['in_dates']: {data['in_dates']}")
+            print(f"data['temp_original_in_dates']: {data['temp_original_in_dates']}")
         # Convert diagnoses string to a list
         data['temp_original_in_diagnoses'] = data['diagnoses'].copy() #.apply(lambda x: str(x).split(',')).copy()
         print("-----------------------------------------------")
@@ -1823,7 +2035,7 @@ def update_DxDates_ExDEP_multi_exclusion(all_data, exclusion_type, exc_diag, exc
         data['Modifier_Position_exc_diagdate'] = data['Modifier_Position_exc_diagdate'].fillna("")
         data['Modified_Position_original_in_dates'] = data['Modified_Position_original_in_dates'].fillna("")
         if (verbose):
-            print(data)
+            print(f"data: {data}")
         print("Build UPDATED "+level2dates+" and "+level2codes)
         # Keep only those level2dates/level2codes that should not be excluded
         data['temp_new_level2codes'] = data.apply(lambda row: [row['temp_in_diagnoses'][i] if i in row['Position_in_dates_keep'] else "" for i in range(len(row['temp_in_diagnoses']))], axis=1)
@@ -1843,7 +2055,7 @@ def update_DxDates_ExDEP_multi_exclusion(all_data, exclusion_type, exc_diag, exc
             ], axis=1)
         # Add information, which exclusion it was
         data['temp_new_level2datemodifierDX'] = data.apply(lambda row: [exc_diag] * len([1 for item in row['Modifier_Position_exc_diagdate'] if item != ""]), axis=1)
-        print(data['temp_new_level2datemodifierDX'])
+        print(f"data['temp_new_level2datemodifierDX']: {data['temp_new_level2datemodifierDX']}")
         data[level2datemodifierDXs] = data.apply(lambda row: [
             date for date in row[level2datemodifierDXs] + row['temp_new_level2datemodifierDX']
             if date.strip() != ''
@@ -1863,13 +2075,13 @@ def update_DxDates_ExDEP_multi_exclusion(all_data, exclusion_type, exc_diag, exc
         # Drop temporary
         data = data.drop(['temp_level2dates', 'temp_exc_diag_date', 'Modifier_Position_exc_diagdate', 'Position_in_dates_keep', 'Modified_Position_in_dates', 'temp_exc_diag', 'temp_in_diagnoses', 'temp_new_level2datemodifierdates', 'temp_new_level2datemodifiercodes', 'temp_new_level2dates', 'temp_new_level2codes', 'Modified_Position_original_in_dates', 'temp_original_in_dates', 'temp_original_in_diagnoses', 'temp_new_level2datemodifierDX'], axis=1)
         if (verbose):
-            print(data.head(2))
+            print(f"data.head(2): {data.head(2)}")
     else:
         del(all_data[diag_lost_due_to_exc])
         print(Warning("No cases given for "+exc_diag+": Skipping this diagnosis."))
     out_data = pd.concat([all_data[~all_data.index.isin(data.index)], data])
     if (verbose):
-        print(out_data.head(2))
+        print(f"out_data.head(2): {out_data.head(2)}")
     del data
     del all_data
     return out_data
@@ -1915,7 +2127,7 @@ def get_values_to_match(multi_inclusions,in_pheno_codes,pheno_requestcol,remove_
             else:
                 values_to_match = in_pheno_codes
         values_to_match = set(str(value) for value in values_to_match)
-        print(values_to_match)
+        print(f"values_to_match: {values_to_match}")
     else:
         # Multi-inclusions case
         if isinstance(in_pheno_codes, str):
@@ -2004,19 +2216,8 @@ def load_lpr_file(lpr_file, dta_input, fsep, lpr_cols_to_read_as_date, DateForma
                 print("INFO: No cols supplied (lpr) that should be read as dates. Trying to infer them: ",lpr_cols_to_read_as_date)     
         return pd.read_csv(
                 lpr_file, sep=fsep, dtype=object,
-                parse_dates=lpr_cols_to_read_as_date
+                dayfirst=DayFirst, parse_dates=lpr_cols_to_read_as_date
             )
-        #try:
-        #    return pd.read_csv(
-        #        lpr_file, sep=fsep, dtype=object, engine='python',
-        #        parse_dates=lpr_cols_to_read_as_date, date_format=DateFormat
-        #    )
-        #except TypeError as error:
-        #    print("WARNING: While reading lpr file with added date_format (",str(DateFormat),") information: ",error)
-        #    df = pd.read_csv(lpr_file, sep=fsep, dtype=object, parse_dates=lpr_cols_to_read_as_date)
-        #    for col in lpr_cols_to_read_as_date:
-        #        df[col] = pd.to_datetime(df[col], format=DateFormat, errors='coerce')
-        #    return df
 
 def merge_secondary_diagnoses(df1, df, diagnostic_col, lpr_recnummer, lpr2nd_recnummer, diagnostic2nd_col):
     """
@@ -2117,7 +2318,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     if (verbose):
         print(f"In process_pheno_and_exclusions. df1.head(5):{df1.head(5)}; df3.head(5):{df3.head(5)}")
         print(f"In process_pheno_and_exclusions. df1.columns:{df1.columns}; df3.columns:{df3.columns}")
-    print(diagnostic_col)
+    print(f"diagnostic_col: {diagnostic_col}")
     if diagnostic_col != "diagnosis":
         if diagnostic_col in df1.columns:
             df1.rename(columns={diagnostic_col: "diagnosis"}, inplace=True)
@@ -2201,7 +2402,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
             # Load the IIDs that should be excluded from file as a DataFrame
             iids_to_exclude = pd.read_csv(general_exclusions, sep=" ", dtype=str)
             if (verbose):
-                print(iids_to_exclude.head(5))
+                print(f"iids_to_exclude.head(5): {iids_to_exclude.head(5)}")
             iids_to_exclude.rename(columns={ iids_to_exclude.columns[0]: iidcol}, inplace=True)
             # Identify rows in df1 that have matching rows in iids_to_exclude (where iids_to_exclude values are not NaN)
             rows_to_drop = df1[df1[iidcol].isin(iids_to_exclude[iidcol])]
@@ -2237,39 +2438,36 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     # Use boolean indexing to extract rows from the first file that match the values 
     print("## Build initial Phenotype cases")
     if multi_inclusions:
+        print("ATC_Requested: ",ATC_Requested)
         tmp_cases_df = pd.DataFrame()
         print("WARNING: Using multiple phenotypes at once can't handle (as of now) ATC codes other than within CHB/DBDS.")
         for InclusionReason in in_pheno_codes['Disorder']:
             print("Building CaseControl list regarding ",InclusionReason)
             values_to_match = ""
             values_to_match = set(str(value) for value in in_pheno_codes.loc[in_pheno_codes['Disorder'] == InclusionReason, "Disorder Codes"].iloc[0])
-            print(values_to_match)
-            if InclusionReason == 'ATC':
+            print(f"values_to_match: {values_to_match}")
+            if InclusionReason == 'ATC' or ATC_Requested == "All" or ATC_Requested == "Some":
                 print("INFO: Identified that you are running ATC call based on the following Name: ",InclusionReason)
                 if cluster_run == "CHB_DBDS":
-                    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
-                    #try:
-                    #    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date, date_format=DateFormat)
-                    #except TypeError:
-                    #    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
-                    print(atc_df1.columns)
+                    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, dayfirst=DayFirst, parse_dates=atc_cols_to_read_as_date)
+                    print(f"atc_df1.head(5): {atc_df1.head(5)}")
                     if (qced_iids != ""):
-                        print(qced_iids_to_keep.head(5))
-                        atc_df1 = atc_df1[atc_df1[iidcol].isin(qced_iids_to_keep)]
-                        del qced_iids_to_keep
+                        if (len(qced_iids_to_keep) > 0):
+                            print(f"qced_iids_to_keep.head(5): {qced_iids_to_keep.head(5)}")
+                            atc_df1 = atc_df1[atc_df1[iidcol].isin(qced_iids_to_keep[iidcol])]
                     if (general_exclusions != ""):
-                        print(iids_to_exclude.head(5))
-                        atc_df1 = atc_df1[~atc_df1[iidcol].isin(iids_to_exclude[iidcol])]
-                        del iids_to_exclude
-                print(len(atc_df1.index))
-                print(atc_df1.head(5))
+                        if (len(iids_to_exclude) > 0):
+                            print(f"iids_to_exclude.head(5): {iids_to_exclude.head(5)}")
+                            atc_df1 = atc_df1[~atc_df1[iidcol].isin(iids_to_exclude[iidcol])]
+                print(f"len(atc_df1.index): {len(atc_df1.index)}")
+                print(f"atc_df1.head(5): {atc_df1.head(5)}")
                 filtered_df = build_phenotype_cases(atc_df1, exact_match, values_to_match, atc_diag_col, birthdatecol, iidcol, atc_date_col, atc_date_col, verbose, Covariates=True, Covar_Name=InclusionReason)[[iidcol, "diagnosis", "diagnoses", "in_dates", "out_dates", "first_dx", "n_diags", "n_unique_in_days"]]
                 print("Identified ",str(len(filtered_df.index))," of Cases for ",InclusionReason)
                 del atc_df1
             else:
                 filtered_df = build_phenotype_cases(df1, exact_match, values_to_match, diagnostic_col, birthdatecol, iidcol, input_date_in_name, input_date_out_name, verbose, Covariates=True, Covar_Name=InclusionReason)[[iidcol, "diagnosis", "diagnoses", "in_dates", "out_dates", "first_dx", "n_diags", "n_unique_in_days"]]
                 print("Identified ",str(len(filtered_df.index))," of Cases for ",InclusionReason)
-            print(filtered_df.columns)
+            print(f"filtered_df.columns: {filtered_df.columns}")
             if not filtered_df.empty:
                 if tmp_cases_df.empty:
                     tmp_cases_df = filtered_df
@@ -2300,13 +2498,16 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                 tmp_cases_df[InclusionReason+'_n_diags'] = ""
                 tmp_cases_df[InclusionReason+'_n_unique_in_days'] = ""
             del filtered_df
+        if (qced_iids != ""):
+            del qced_iids_to_keep
+        if (general_exclusions != ""):
+            del iids_to_exclude
+    
     else:
         print("ATC_Requested: ",ATC_Requested)
         if ATC_Requested == "All": #Add a global variable used to identify if all, some, or none of the codes are ATC based.
             if cluster_run == "CHB_DBDS":
-                atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
-                #except TypeError:
-                #    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
+                atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, dayfirst=DayFirst, parse_dates=atc_cols_to_read_as_date)
                 print(atc_df1.columns)
                 if (qced_iids != ""):
                     print(qced_iids_to_keep.head(5))
@@ -2317,13 +2518,12 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                     atc_df1 = atc_df1[~atc_df1[iidcol].isin(iids_to_exclude[iidcol])]
                     del iids_to_exclude
             print("Running (ALL) ATC identification using atc_diag_col",atc_diag_col,", atc_date_col",atc_date_col)
-            print(atc_df1.head(5))
+            print(f"atc_df1.head(5): {atc_df1.head(5)}")
             tmp_cases_df = build_phenotype_cases(atc_df1, exact_match, values_to_match, atc_diag_col, birthdatecol, iidcol, atc_date_col, atc_date_col, verbose)
+            #tmp_controls_df = merge_IIDs(atc_df1[~atc_df1[iidcol].isin(tmp_cases_df[iidcol])].copy(), atc_diag_col, birthdatecol, atc_date_col, atc_date_col, iidcol, verbose, Cases=False, BuildEntryExitDates=BuildEntryExitDates)
         elif ATC_Requested == "Some":
             if cluster_run == "CHB_DBDS":
-                atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
-                #except TypeError:
-                #    atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, parse_dates=atc_cols_to_read_as_date)
+                atc_df1 = pd.read_csv(atc_file, sep=fsep, dtype=object, dayfirst=DayFirst, parse_dates=atc_cols_to_read_as_date)
                 if (qced_iids != ""):
                     atc_df1 = atc_df1[atc_df1[iidcol].isin(iids_to_keep[iidcol])]
                 if (general_exclusions != ""):
@@ -2331,47 +2531,21 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
             atc_values_to_match = [value for value in values_to_match if str(value).startswith('ATC')]
             non_atc_values_to_match = [value for value in values_to_match if not str(value).startswith('ATC')]
             tmp_cases_df = build_phenotype_cases([df1,atc_df1], exact_match, [non_atc_values_to_match,atc_values_to_match], [diagnostic_col,atc_diag_col], birthdatecol, iidcol, [input_date_in_name,atc_date_col], [input_date_out_name,atc_date_col], verbose)
+            #tmp_controls_df = merge_IIDs(df1[~df1[iidcol].isin(tmp_cases_df[iidcol])].copy(), diagnostic_col, birthdatecol, input_date_in_name, input_date_out_name, iidcol, verbose, Cases=False, BuildEntryExitDates=BuildEntryExitDates)
         else:
             tmp_cases_df = build_phenotype_cases(df1, exact_match, values_to_match, diagnostic_col, birthdatecol, iidcol, input_date_in_name, input_date_out_name, verbose)
+            #tmp_controls_df = merge_IIDs(df1[~df1[iidcol].isin(tmp_cases_df[iidcol])].copy(), diagnostic_col, birthdatecol, input_date_in_name, input_date_out_name, iidcol, verbose, Cases=False, BuildEntryExitDates=BuildEntryExitDates)
     #Housekeeping
     del in_pheno_codes
     if (len(tmp_cases_df) == 0):
         print("Error: No Cases found. Are your input diagnostic codes given in the phenotype file? Exiting")
         print("Info: Phenotype codes to map: ")
         print(values_to_match)
-        exit()
+        #exit()
     if (input_date_out_name == input_date_in_name):
         input_date_out_name = 'date_out'
-    if (BuildEntryExitDates):
-        print("## Build initial Phenotype controls")
-        tmp_controls_df = merge_IIDs(df1[~df1[iidcol].isin(tmp_cases_df[iidcol])].copy(), diagnostic_col, birthdatecol, input_date_in_name, input_date_out_name, iidcol, verbose, Cases=False, BuildEntryExitDates=True)
-        print("Identified initially ",str(tmp_controls_df[iidcol].nunique())," IIDs that do not have an overlapping diagnostic code (Non-Cases).")
-        print(len(tmp_cases_df)," Cases; ",len(tmp_controls_df)," Controls.")
-        if use_predefined_exdep_exclusions & verbose:
-            print("Mem after building tmp_cases_df and tmp_controls_df")
-            usage()
-        # Set diagnosis column of controls to "controls"
-        tmp_controls_df[diagnostic_col] = "Control"
-        if (diagnostic_col == "diagnoses"):
-            diagnostic_col = "diagnosis"
-        # Cleanup controls
-        columns_to_keep = [iidcol, diagnostic_col, "first_dx", "last_dx","Entry_Date","Exit_Date"]
-        if birthdatecol in tmp_controls_df.columns:
-            columns_to_keep.insert(1, birthdatecol)
-        tmp_controls_df = tmp_controls_df.loc[:, columns_to_keep]
-        if (verbose):
-            print("Mem after updating tmp_controls_df:")
-            usage()
-        # Add controls
-        casecontrol_df = pd.concat([tmp_cases_df, tmp_controls_df], ignore_index=True, sort=False)
-        casecontrol_df.drop_duplicates(subset=[iidcol], inplace=True)
-        if (verbose):
-            print("tmp_cases_df: (",str(tmp_cases_df[iidcol].nunique())," rows) - ",tmp_cases_df.columns)
-            print("tmp_controls_df: (",str(tmp_controls_df[iidcol].nunique())," rows) - ",tmp_controls_df.columns)
-            print("casecontrol_df: (",str(casecontrol_df[iidcol].nunique())," rows) - ",casecontrol_df.columns)
-        del tmp_controls_df
-    else:
-        casecontrol_df = tmp_cases_df.copy()
+    
+    casecontrol_df = tmp_cases_df.copy()
     del tmp_cases_df
     if (verbose):
         print("Mem after building casecontrol_df and cleaning up tmp_cases_df and tmp_controls_df:")
@@ -2558,8 +2732,20 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     if (verbose):
         print ("Mem after building Lifetime exclusions and deleteing df1.")
         usage()
+        print(casecontrol_df.head(5))
+        print(df3.head(5))
     # Add information from stam_file and keep also IIDs that are not given in df1 (lpr_file).
-    result_df = pd.merge(casecontrol_df, df3, on=iidcol, how='outer')
+    if casecontrol_df.empty:
+        print("casecontrol_df is empty")
+        casecontrol_df = pd.DataFrame(columns=[iidcol,"diagnosis","diagnoses","in_dates","out_dates","first_dx","n_diags","n_unique_in_days"])
+        #result_df = df3.copy()
+        result_df = pd.merge(casecontrol_df, df3, on=iidcol, how='outer')
+        result_df["diagnosis"] = "Control"
+
+    else:
+        result_df = pd.merge(casecontrol_df, df3, on=iidcol, how='outer')
+    if (verbose):
+        print(result_df.head(5))
     result_df.loc[(result_df["diagnosis"] != "Case") & 
               (result_df["diagnosis"] != "Control") & 
               (result_df["diagnosis"] != "Case_Excluded"), "diagnosis"] = "Control"
@@ -2618,52 +2804,48 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     case_indices = np.where(result_df['diagnosis'] == 'Case')[0]
     case_rows = result_df.iloc[case_indices]
     # Identify case rows
-    print(case_rows.head(5))
-    print(type(case_rows))
+    print("case_rows.head(5):",case_rows.head(5))
+    print("type(case_rows):",type(case_rows))
     print(case_rows.shape)
-    print(result_df.shape)
+    print("result_df.shape:",result_df.shape)
     print(result_df.loc[case_indices, 'temp_first_dx'].head(5))
     print(result_df.loc[case_indices, 'temp_birthdate'].head(5))
     print(type(result_df.loc[case_indices, 'temp_first_dx']))
     print(type(result_df.loc[case_indices, 'temp_birthdate']))
+    if len(case_rows) > 0:
     # Calculate the age at first diagnosis
-    #age_first_dx = (pd.to_datetime(result_df.loc[case_indices, 'temp_first_dx'], format=DateFormat) - pd.to_datetime(result_df.loc[case_indices, 'temp_birthdate'], format=DateFormat)).dt.days // 365
-    try:
-        # Use the helper function to convert each element
-        first_dx_converted = result_df.loc[case_indices, 'temp_first_dx'].apply(convert_if_not_datetime)
-        birthdate_converted = result_df.loc[case_indices, 'temp_birthdate'].apply(convert_if_not_datetime)
-        
-        # Compute age in years (approximate)
-        age_first_dx = (first_dx_converted - birthdate_converted).dt.days // 365
-        #age_first_dx = (
-        #    pd.to_datetime(result_df.loc[case_indices, 'temp_first_dx'], format=DateFormat) - 
-        #    pd.to_datetime(result_df.loc[case_indices, 'temp_birthdate'], format=DateFormat)
-        #).dt.days // 365
-    except Exception as e:
-        print(f"WARNING while processing date columns: {e}. Attempting to fix formats...")
+        try:
+            # Use the helper function to convert each element
+            first_dx_converted = result_df.loc[case_indices, 'temp_first_dx'].apply(convert_if_not_datetime)
+            birthdate_converted = result_df.loc[case_indices, 'temp_birthdate'].apply(convert_if_not_datetime)
+            
+            # Compute age in years (approximate)
+            age_first_dx = (first_dx_converted - birthdate_converted).dt.days // 365
+        except Exception as e:
+            print(f"WARNING while processing date columns: {e}. Attempting to fix formats...")
 
-        # Convert to datetime, force errors to NaT
-        result_df['temp_first_dx'] = pd.to_datetime(result_df['temp_first_dx'], errors='coerce')
-        result_df['temp_birthdate'] = pd.to_datetime(result_df['temp_birthdate'], errors='coerce')
+            # Convert to datetime, force errors to NaT
+            result_df['temp_first_dx'] = pd.to_datetime(result_df['temp_first_dx'], errors='coerce')
+            result_df['temp_birthdate'] = pd.to_datetime(result_df['temp_birthdate'], errors='coerce')
 
-        # Ensure both are timezone-naive
-        result_df['temp_first_dx'] = result_df['temp_first_dx'].dt.tz_localize(None)
-        result_df['temp_birthdate'] = result_df['temp_birthdate'].dt.tz_localize(None)
+            # Ensure both are timezone-naive
+            result_df['temp_first_dx'] = result_df['temp_first_dx'].dt.tz_localize(None)
+            result_df['temp_birthdate'] = result_df['temp_birthdate'].dt.tz_localize(None)
 
-        # Drop rows with NaT values if necessary
-        mask_valid = result_df[['temp_first_dx', 'temp_birthdate']].notna().all(axis=1)
+            # Drop rows with NaT values if necessary
+            mask_valid = result_df[['temp_first_dx', 'temp_birthdate']].notna().all(axis=1)
 
-        age_first_dx = (
-            result_df.loc[case_indices & mask_valid, 'temp_first_dx'] - 
-            result_df.loc[case_indices & mask_valid, 'temp_birthdate']
-        ).dt.days // 365
+            age_first_dx = (
+                result_df.loc[case_indices & mask_valid, 'temp_first_dx'] - 
+                result_df.loc[case_indices & mask_valid, 'temp_birthdate']
+            ).dt.days // 365
 
 
-    # Assign the calculated values to the DataFrame
-    result_df.loc[case_indices, 'Age_FirstDx'] = age_first_dx
-    print(result_df.loc[case_indices, ["diagnosis", "temp_first_dx", "temp_birthdate"]].head())
-    result_df.drop("temp_first_dx", inplace=True, axis=1)
-    result_df.drop("temp_birthdate", inplace=True, axis=1)
+        # Assign the calculated values to the DataFrame
+        result_df.loc[case_indices, 'Age_FirstDx'] = age_first_dx
+        print(result_df.loc[case_indices, ["diagnosis", "temp_first_dx", "temp_birthdate"]].head())
+        result_df.drop("temp_first_dx", inplace=True, axis=1)
+        result_df.drop("temp_birthdate", inplace=True, axis=1)
     if (verbose):
         print(result_df.head(5))
     if (verbose):
@@ -2882,6 +3064,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                 (final_df['fkode_f'].between(min_code, max_code)), 
                 'both_parents_DK'
             ] = True
+            final_df._consolidate_inplace()
             final_df['DK_born'] = False
             #final_df.loc[(final_df['fkode'] >= min_code) & (final_df['fkode'] <= max_code), 'DK_born'] = True
             final_df.loc[final_df['fkode'].between(min_code, max_code), 'DK_born'] = True
@@ -2905,7 +3088,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         with open(outfile+'.pickle', 'wb') as handle:
             pickle.dump(final_df, handle, protocol=pickle.HIGHEST_PROTOCOL)
     if iidcol != "IID":
-        final_df['IID'] = final_df[iidcol].copy
+        final_df['IID'] = final_df[iidcol].copy()
     if write_fastGWA_format:
         print("Building FastGWA phenotype file.")
         # Create the 'FID' and 'IID' columns based on 'IID'
@@ -2930,13 +3113,18 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     
 
 #TODO: Update to be more efficient and to use the new lpr_load functions
-def batch_load_lprfile(df, lprfile, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose):
+def batch_load_lprfile_(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnummer, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose):
     if verbose:
         print(f"Loading lprfile {lprfile} in batch loop {batch_num + 1}")
     df1_rows_to_keep = load_mapping_rows(lprfile, iidcol, iid_batch, fsep)
     temp_file = str(uuid.uuid4())[:4]+".filtered_temp.csv"
     build_temp_file(lprfile, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
     lprfile = temp_file
+    if lpr2nd_file != "":
+        df1_rows_to_keep = load_mapping_rows(lpr2nd_file, iidcol, iid_batch, fsep)
+        temp_file = str(uuid.uuid4())[:4]+".filtered_temp.csv"
+        build_temp_file(lpr2nd_file, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
+        lpr2nd_file = temp_file
     # Identify the set of columns that are dates
     df_header = pd.read_csv(lprfile, sep=fsep, dtype=object, nrows=0)
     if verbose:
@@ -2955,12 +3143,12 @@ def batch_load_lprfile(df, lprfile, iidcol, iid_batch, batch_num, fsep, potentia
     del df_header
     if available_date_cols:
         try:
-            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, parse_dates=available_date_cols)
+            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, dayfirst=DayFirst, parse_dates=available_date_cols)
             if verbose:
                 print(f"Finished loading chunk {batch_num}. Appending it now to the dataframe (as multiple lpr files were supplied).")
             df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
         except TypeError:
-            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, engine='python', parse_dates=available_date_cols)
+            filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=object, engine='python', dayfirst=DayFirst, parse_dates=available_date_cols)
             if verbose:
                 print(f"Finished loading chunk {batch_num}. (Within TypeError) Updating the dateformat and appending it to the dataframe (as multiple lpr files were supplied).")
             df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
@@ -2970,7 +3158,7 @@ def batch_load_lprfile(df, lprfile, iidcol, iid_batch, batch_num, fsep, potentia
                 print(f"Finished loading chunk {batch_num}. (Within ValueError) Updating the dateformat and appending it to the dataframe (as multiple lpr files were supplied).")
             for col in available_date_cols:
                 if col in filtered_chunk.columns:
-                    filtered_chunk[col] = filtered_chunk[col].apply(lambda x: convert_if_not_datetime(x) if pd.notnull(x) else pd.NaT) #filtered_chunk[col] = pd.to_datetime(filtered_chunk[col], format=DateFormat, errors='coerce')
+                    filtered_chunk[col] = filtered_chunk[col].apply(lambda x: convert_if_not_datetime(x) if pd.notnull(x) else pd.NaT) 
             df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
         #gc.collect()
     else:
@@ -2991,7 +3179,79 @@ def batch_load_lprfile(df, lprfile, iidcol, iid_batch, batch_num, fsep, potentia
     return df
 
 
-def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic_col, lpr_cols_to_read_as_date, potential_lpr_cols_to_read_as_date, dta_input, MatchFI, df3, iidcol, verbose, ctype_excl, ctype_incl, Filter_YoB, Filter_Gender, use_predefined_exdep_exclusions, RegisterRun, dst, ipsych_run, dbds_run, cluster_run, exact_match, skip_icd_update, remove_point_in_diag_request, ICDCM, qced_iids, general_exclusions, multi_inclusions, in_pheno_codes, pheno_requestcol, atc_diag_col, birthdatecol, atc_date_col, atc_cols_to_read_as_date, atc_file, fsep, BuildEntryExitDates, lifetime_exclusions_file, post_exclusions_file, oneYearPrior_exclusions_file, outfile, write_Plink2_format, write_fastGWA_format, write_pickle, n_stam_iids, exclCHBcontrols, iidstatus_col, addition_information_file, sexcol, input_date_in_name, input_date_out_name, df4):
+def batch_load_lprfile(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnummer,
+                       iidcol, iid_batch, batch_num, fsep,
+                       potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date,
+                       verbose, dta_input, DateFormat, diagnostic_col, diagnostic2nd_col):
+    """
+    Refactored batch loader that now calls process_lpr_data to load and merge the LPR files.
+    
+    Parameters:
+      df : DataFrame
+          The accumulator DataFrame to which the loaded data will be appended.
+      lprfile : str
+          The primary LPR file (or comma-separated list of files).
+      lpr_recnummer : str
+          Identifier used in merging diagnosis data.
+      lpr2nd_file : str
+          The secondary LPR file(s) (or comma-separated list) if provided.
+      lpr2nd_recnummer : str
+          Identifier for the secondary diagnosis.
+      iidcol, iid_batch : (unused)
+          Legacy parameters that are no longer needed.
+      batch_num : int
+          Current batch index (for verbose messaging).
+      fsep : str
+          The file separator.
+      potential_lpr_cols_to_read_as_date : list
+          List of columns to try to parse as dates.
+      lpr_cols_to_read_as_date : list
+          List of columns to explicitly read as dates.
+      verbose : bool
+          If True, print progress messages.
+      dta_input : object
+          Input to be passed to load_lpr_file (see process_lpr_data).
+      DateFormat : str
+          Format for parsing dates.
+      diagnostic_col : str
+          Primary diagnostic column name.
+      diagnostic2nd_col : str
+          Secondary diagnostic column name.
+    
+    Returns:
+      df : DataFrame
+          The updated DataFrame with loaded LPR data appended.
+    """
+    if verbose:
+        print(f"Loading LPR files in batch loop {batch_num + 1}")
+
+    # Delegate all file loading and merging to process_lpr_data.
+    df_new = process_lpr_data(
+        lpr_file=lprfile,
+        lpr2nd_file=lpr2nd_file,
+        dta_input=dta_input,
+        fsep=fsep,
+        lpr_cols_to_read_as_date=lpr_cols_to_read_as_date,
+        DateFormat=DateFormat,
+        potential_lpr_cols_to_read_as_date=potential_lpr_cols_to_read_as_date,
+        diagnostic_col=diagnostic_col,
+        diagnostic2nd_col=diagnostic2nd_col,
+        lpr_recnummer=lpr_recnummer,
+        lpr2nd_recnummer=lpr2nd_recnummer
+    )
+
+    # Append the newly loaded data to the existing DataFrame.
+    df = pd.concat([df, df_new], ignore_index=True, sort=False)
+    if verbose:
+        print(f"Finished loading batch {batch_num + 1}. DataFrame shape: {df.shape}")
+    return df
+
+def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic_col, lpr_cols_to_read_as_date, potential_lpr_cols_to_read_as_date, 
+dta_input, MatchFI, df3, iidcol, verbose, ctype_excl, ctype_incl, Filter_YoB, Filter_Gender, use_predefined_exdep_exclusions, 
+RegisterRun, dst, ipsych_run, dbds_run, cluster_run, exact_match, skip_icd_update, remove_point_in_diag_request, ICDCM, qced_iids, 
+general_exclusions, multi_inclusions, in_pheno_codes, pheno_requestcol, atc_diag_col, birthdatecol, atc_date_col, atc_cols_to_read_as_date, 
+atc_file, fsep, BuildEntryExitDates, lifetime_exclusions_file, post_exclusions_file, oneYearPrior_exclusions_file, outfile, write_Plink2_format, 
+write_fastGWA_format, write_pickle, n_stam_iids, exclCHBcontrols, iidstatus_col, addition_information_file, sexcol, input_date_in_name, input_date_out_name, df4):
     iids = df3[iidcol].unique()  # Get unique IIDs from df3
     batch_size = int(batch_size)
     num_batches = int(np.ceil(len(iids) / batch_size))  # Calculate the number of batches
@@ -3006,125 +3266,136 @@ def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic
         df3 = df3backup[df3backup[iidcol].isin(iid_batch)]
         n_stam_iids=len(df3[iidcol])
         print(f"Processing batch {batch_num + 1}/{num_batches} with {len(iid_batch)} IIDs... {iid_batch[:5]}")
-        recnums_to_keep = []
-        if ',' in lpr_file:
-            # Split the string by comma
-            file_paths = lpr_file.split(',')
-            multi_diag_cols = False
-            if ',' in diagnostic_col:
-                diag_cols = diagnostic_col.split(',')
-                multi_diag_cols = True
-                diagnostic_col = diag_cols[0]
-                curr=0
-            # Now file_paths is a list containing individual file paths; Initialize an empty DataFrame to store the concatenated data
-            df1 = pd.DataFrame()
-            # Iterate over each file path
-            for lprfile in file_paths:
-                df = pd.DataFrame()
-                # Read the file in chunks and filter rows; Read the CSV file and append it to df1
-                if dta_input:
-                    chunk = pd.read_stata(lprfile)
-                    # Filter rows where the first column (index 0) matches the IIDs
-                    filtered_chunk = chunk[chunk[iidcol].isin(iid_batch)]
-                    df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
-                    del chunk
-                    del filtered_chunk
-                    #gc.collect()
-                else:
-                    df = batch_load_lprfile(df, lprfile, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose)
-                if multi_diag_cols:
-                    df.rename(columns={diag_cols[curr]: diagnostic_col},inplace=True)
-                    curr += 1
-                print(f"Mem at the end of loading {lprfile} within batch loop {batch_num + 1}/{num_batches}:")
-                usage()
-                if lpr2nd_file != "":
-                    print("INFO: As you are also loading the files containing the secondary diagnoses, we will remove all rows in the standard LPR that refer to DZ03* or DZ763 as these may lead to issues. In addition, we will also remove all \'H\' diag_types.")
-                    # Remove rows where diagnostic_col refers to accompanying persons. Recommended by Dorte Helenius on 10.01.2025
-                    before_rows = len(df)
-                    df = df[~df[diagnostic_col].str.startswith(('DZ03', 'DZ763'), na=False)]
-                    print(f"Removed {before_rows - len(df)} rows of the current batch due to DZ03 or DZ763 diagnosis.")
-                    recnums_to_keep.extend(df[lpr_recnummer].unique())
-                    recnums_to_keep = list(dict.fromkeys(recnums_to_keep))  # Ensure uniqueness while preserving order
-                df1 = pd.concat([df1, df], ignore_index=True, sort=False)
-                del(df)
-            del(file_paths)
-        else:
+        # recnums_to_keep = []
+        df1 =  batch_load_lprfile(df = df1, lprfile = lpr_file, lpr_recnummer = lpr_recnummer, lpr2nd_file = lpr2nd_file, lpr2nd_recnummer = lpr2nd_recnummer,
+                    iidcol = iidcol, iid_batch = iid_batch, batch_num = batch_num, fsep = fsep,
+                    potential_lpr_cols_to_read_as_date = potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date = lpr_cols_to_read_as_date,
+                    verbose = verbose, dta_input = dta_input, DateFormat = DateFormat, diagnostic_col = diagnostic_col, diagnostic2nd_col = diagnostic2nd_col)
+        # if ',' in lpr_file:
+        #     # Split the string by comma
+        #     file_paths = lpr_file.split(',')
+        #     multi_diag_cols = False
+        #     if ',' in diagnostic_col:
+        #         diag_cols = diagnostic_col.split(',')
+        #         multi_diag_cols = True
+        #         diagnostic_col = diag_cols[0]
+        #         curr=0
+        #     # Now file_paths is a list containing individual file paths; Initialize an empty DataFrame to store the concatenated data
+        #     df1 = pd.DataFrame()
+        #     # Iterate over each file path
+        #     for lprfile in file_paths:
+        #         df = pd.DataFrame()
+        #         # Read the file in chunks and filter rows; Read the CSV file and append it to df1
+        #         #if dta_input:
+        #         #    chunk = pd.read_stata(lprfile)
+        #         #    # Filter rows where the first column (index 0) matches the IIDs
+        #         #    filtered_chunk = chunk[chunk[iidcol].isin(iid_batch)]
+        #         #    df = pd.concat([df, filtered_chunk], ignore_index=True, sort=False)
+        #         #    del chunk
+        #         #    del filtered_chunk
+        #         #    #gc.collect()
+        #         #else:
+        #         #    df = batch_load_lprfile(df, lprfile, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose)
+        #         df =  batch_load_lprfile(df = df, lprfile = lprfile, lpr_recnummer = lpr_recnummer, lpr2nd_file = lpr2nd_file, lpr2nd_recnummer = lpr2nd_recnummer,
+        #             iidcol = iidcol, iid_batch = iid_batch, batch_num = batch_num, fsep = fsep,
+        #             potential_lpr_cols_to_read_as_date = potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date = lpr_cols_to_read_as_date,
+        #             verbose = verbose, dta_input = dta_input, DateFormat = DateFormat, diagnostic_col = diagnostic_col, diagnostic2nd_col = diagnostic2nd_col)
+        #         if multi_diag_cols:
+        #             df.rename(columns={diag_cols[curr]: diagnostic_col},inplace=True)
+        #             curr += 1
+        #         print(f"Mem at the end of loading {lprfile} within batch loop {batch_num + 1}/{num_batches}:")
+        #         usage()
+        #         if lpr2nd_file != "":
+        #             print("INFO: As you are also loading the files containing the secondary diagnoses, we will remove all rows in the standard LPR that refer to DZ03* or DZ763 as these may lead to issues. In addition, we will also remove all \'H\' diag_types.")
+        #             # Remove rows where diagnostic_col refers to accompanying persons. Recommended by Dorte Helenius on 10.01.2025
+        #             before_rows = len(df)
+        #             df = df[~df[diagnostic_col].str.startswith(('DZ03', 'DZ763'), na=False)]
+        #             print(f"Removed {before_rows - len(df)} rows of the current batch due to DZ03 or DZ763 diagnosis.")
+        #             recnums_to_keep.extend(df[lpr_recnummer].unique())
+        #             recnums_to_keep = list(dict.fromkeys(recnums_to_keep))  # Ensure uniqueness while preserving order
+        #         df1 = pd.concat([df1, df], ignore_index=True, sort=False)
+        #         del(df)
+        #     del(file_paths)
+        #else:
             # Load the first file as a DataFrame(should be phenotype file) 
-            if dta_input:
-                chunk = pd.read_stata(lpr_file)
-                # Filter rows where the first column (index 0) matches the IIDs
-                filtered_chunk = chunk[chunk[iidcol].isin(iid_batch)]
-                df1 = pd.concat([df1, filtered_chunk], ignore_index=True, sort=False)
-                del chunk
-                del filtered_chunk
-                gc.collect()
-            else:
-                df1 = batch_load_lprfile(df1, lpr_file, lpr2nd_file, lpr2nd_recnummer, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose)
+            #if dta_input:
+            #    chunk = pd.read_stata(lpr_file)
+            #    # Filter rows where the first column (index 0) matches the IIDs
+            #    filtered_chunk = chunk[chunk[iidcol].isin(iid_batch)]
+            #    df1 = pd.concat([df1, filtered_chunk], ignore_index=True, sort=False)
+            #    del chunk
+            #    del filtered_chunk
+            #    gc.collect()
+            #else:
+            #df1 = batch_load_lprfile(df = df1, lprfile = lpr_file, lpr_recnummer = lpr_recnummer, lpr2nd_file = lpr2nd_file, lpr2nd_recnummer = lpr2nd_recnummer,
+            #        iidcol = iidcol, iid_batch = iid_batch, batch_num = batch_num, fsep = fsep,
+            #        potential_lpr_cols_to_read_as_date = potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date = lpr_cols_to_read_as_date,
+            #        verbose = verbose, dta_input = dta_input, DateFormat = DateFormat, diagnostic_col = diagnostic_col, diagnostic2nd_col = diagnostic2nd_col)
                 #TODO: Add the check if lpr2nd_file is a list or a single file.
-        if lpr2nd_file != "" and recnums_to_keep:
-            if ',' in lpr2nd_file:
-                file_paths = lpr2nd_file.split(',')
-            else:
-                file_paths = [lpr2nd_file]
-            recnum_batch = recnums_to_keep #sorted(df[lpr_recnummer].unique())
-            recnums_to_keep = []
-            print(f"Identified {len(recnum_batch)} recnums to load from secondary diagnosis files within batch {batch_num + 1}.")
-            for lprfile in file_paths:
-                if verbose:
-                    print(f"Loading lprfile {lprfile} in batch loop {batch_num + 1}")
-                df1_rows_to_keep = load_mapping_rows(lprfile, lpr2nd_recnummer, recnum_batch, fsep)
-                print(f"Keeping the following rows from secondary diagnosis file {lprfile} in batch loop {batch_num + 1}: {df1_rows_to_keep[:10]}")
-                temp_file = str(uuid.uuid4())[:4]+".filtered_temp.csv"
-                build_temp_file(lprfile, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
-                lprfile = temp_file
-                # Identify the set of columns that are dates
-                df_header = pd.read_csv(lprfile, sep=fsep, dtype=object, nrows=0)
-                if verbose:
-                    print(f"Header of the current lprfile: {df_header.columns}")
-                if(df_header.columns.empty):
-                    print("ERROR: Could not load -f file: ",lprfile)
-                    sys.exit()
-                filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=str)
-                if verbose:
-                    print(f"Finished loading chunk {batch_num + 1}. (Within else) Appending it to the dataframe (as multiple lpr files were supplied).")
-                before_rows = len(filtered_chunk)
-                print(f"Identified {before_rows} rows of secondary diagnoses to be added to the main dataframe. {filtered_chunk.head(5)}.")
-                # Remove rows where 'diag_type' column has 'H'
-                #if 'c_diagtype' in filtered_chunk.columns:
-                #    filtered_chunk = filtered_chunk[filtered_chunk['c_diagtype'] != 'H']
-                #    print(f"Removed {before_rows - len(filtered_chunk)} rows of secondary diagnoses as they were a referral diagnosis from the General Practitioner (\"H\").")
-                if lpr_recnummer != lpr2nd_recnummer:
-                    filtered_chunk.rename(columns={lpr2nd_recnummer: lpr_recnummer},inplace=True)
-                if diagnostic_col != diagnostic2nd_col:
-                    filtered_chunk.rename(columns={diagnostic2nd_col: diagnostic_col},inplace=True)
-                df1_temp = pd.merge(
-                    filtered_chunk[[diagnostic_col, lpr_recnummer]],  # Base is filtered_chunk with potential duplicates
-                    df1.drop(columns=[diagnostic_col], errors='ignore'),  # Add information from df
-                    on=lpr_recnummer, 
-                    how='inner'  # Only keep rows with matching recnum values
-                )
-                if "c_tildiag" in df1_temp.columns:
-                    filtered_chunk = df1_temp.copy()
-                    filtered_chunk.drop(columns=[diagnostic_col],inplace=True)
-                    filtered_chunk.rename(columns={"c_tildiag": diagnostic_col},inplace=True)
-                    df1_temp = pd.concat([df1_temp, filtered_chunk], ignore_index=True, sort=False)
-                before_rows = len(df1_temp)
-                df1_temp.drop_duplicates(inplace=True)
-                print(f"After merging df with filtered_chunk, we have {before_rows} entries. {before_rows - len(df1_temp)} entries were deleted due to duplication. {df1_temp.head(5)}.\n{df1_temp.describe(include='all')}")
-                before_rows = len(df1)
-                df1 = pd.concat([df1, df1_temp], ignore_index=True, sort=False)
-                if(verbose):
-                    df1.to_csv(outfile+".df1_2nd_merged", sep="\t", index=False, quoting=False)
-                print(f"Finally, batch {batch_num + 1} resulted in {len(df1)} ({before_rows}+{len(df1_temp)}) entries to be used to determine the CaseControl status.")
-                #gc.collect()
-                if verbose:
-                    print(f"In batch loop of batch_load_df1_process_pheno_and_exclusions with filtered_chunk.head(5):{filtered_chunk.head(5)}\ndf:{df1.head(5)}\ndf1_temp:{df1_temp.head(5)}")
-                del filtered_chunk
-                #gc.collect()
-                os.remove(temp_file)
-                del(df1_temp)
-                del(lprfile)
-            del(file_paths)
+        # if lpr2nd_file != "" and recnums_to_keep:
+        #     if ',' in lpr2nd_file:
+        #         file_paths = lpr2nd_file.split(',')
+        #     else:
+        #         file_paths = [lpr2nd_file]
+        #     recnum_batch = recnums_to_keep #sorted(df[lpr_recnummer].unique())
+        #     recnums_to_keep = []
+        #     print(f"Identified {len(recnum_batch)} recnums to load from secondary diagnosis files within batch {batch_num + 1}.")
+        #     for lprfile in file_paths:
+        #         if verbose:
+        #             print(f"Loading lprfile {lprfile} in batch loop {batch_num + 1}")
+        #         df1_rows_to_keep = load_mapping_rows(lprfile, lpr2nd_recnummer, recnum_batch, fsep)
+        #         print(f"Keeping the following rows from secondary diagnosis file {lprfile} in batch loop {batch_num + 1}: {df1_rows_to_keep[:10]}")
+        #         temp_file = str(uuid.uuid4())[:4]+".filtered_temp.csv"
+        #         build_temp_file(lprfile, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
+        #         lprfile = temp_file
+        #         # Identify the set of columns that are dates
+        #         df_header = pd.read_csv(lprfile, sep=fsep, dtype=object, nrows=0)
+        #         if verbose:
+        #             print(f"Header of the current lprfile: {df_header.columns}")
+        #         if(df_header.columns.empty):
+        #             print("ERROR: Could not load -f file: ",lprfile)
+        #             sys.exit()
+        #         filtered_chunk = pd.read_csv(lprfile, sep=fsep, dtype=str)
+        #         if verbose:
+        #             print(f"Finished loading chunk {batch_num + 1}. (Within else) Appending it to the dataframe (as multiple lpr files were supplied).")
+        #         before_rows = len(filtered_chunk)
+        #         print(f"Identified {before_rows} rows of secondary diagnoses to be added to the main dataframe. {filtered_chunk.head(5)}.")
+        #         # Remove rows where 'diag_type' column has 'H'
+        #         #if 'c_diagtype' in filtered_chunk.columns:
+        #         #    filtered_chunk = filtered_chunk[filtered_chunk['c_diagtype'] != 'H']
+        #         #    print(f"Removed {before_rows - len(filtered_chunk)} rows of secondary diagnoses as they were a referral diagnosis from the General Practitioner (\"H\").")
+        #         if lpr_recnummer != lpr2nd_recnummer:
+        #             filtered_chunk.rename(columns={lpr2nd_recnummer: lpr_recnummer},inplace=True)
+        #         if diagnostic_col != diagnostic2nd_col:
+        #             filtered_chunk.rename(columns={diagnostic2nd_col: diagnostic_col},inplace=True)
+        #         df1_temp = pd.merge(
+        #             filtered_chunk[[diagnostic_col, lpr_recnummer]],  # Base is filtered_chunk with potential duplicates
+        #             df1.drop(columns=[diagnostic_col], errors='ignore'),  # Add information from df
+        #             on=lpr_recnummer, 
+        #             how='inner'  # Only keep rows with matching recnum values
+        #         )
+        #         if "c_tildiag" in df1_temp.columns:
+        #             filtered_chunk = df1_temp.copy()
+        #             filtered_chunk.drop(columns=[diagnostic_col],inplace=True)
+        #             filtered_chunk.rename(columns={"c_tildiag": diagnostic_col},inplace=True)
+        #             df1_temp = pd.concat([df1_temp, filtered_chunk], ignore_index=True, sort=False)
+        #         before_rows = len(df1_temp)
+        #         df1_temp.drop_duplicates(inplace=True)
+        #         print(f"After merging df with filtered_chunk, we have {before_rows} entries. {before_rows - len(df1_temp)} entries were deleted due to duplication. {df1_temp.head(5)}.\n{df1_temp.describe(include='all')}")
+        #         before_rows = len(df1)
+        #         df1 = pd.concat([df1, df1_temp], ignore_index=True, sort=False)
+        #         if(verbose):
+        #             df1.to_csv(outfile+".df1_2nd_merged", sep="\t", index=False, quoting=False)
+        #         print(f"Finally, batch {batch_num + 1} resulted in {len(df1)} ({before_rows}+{len(df1_temp)}) entries to be used to determine the CaseControl status.")
+        #         #gc.collect()
+        #         if verbose:
+        #             print(f"In batch loop of batch_load_df1_process_pheno_and_exclusions with filtered_chunk.head(5):{filtered_chunk.head(5)}\ndf:{df1.head(5)}\ndf1_temp:{df1_temp.head(5)}")
+        #         del filtered_chunk
+        #         #gc.collect()
+        #         os.remove(temp_file)
+        #         del(df1_temp)
+        #         del(lprfile)
+        #     del(file_paths)
         gc.collect()
         if(exact_match):
             print("Info: Updating the diagnostic codes to be all Uppercase to be able to run --eM")
@@ -3134,6 +3405,8 @@ def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic
             #     if isinstance(value, str):
             #         df1.at[index, diagnostic_col] = value.upper()
         print(f"At the end of batch_load_df1_process_pheno_and_exclusions with df1.head(5):{df1.head(5)}")
+        if BuildEntryExitDates:
+            df3 = BuildEntryExitDate(df1, df3, iidcol, input_date_in_name, input_date_out_name, verbose)
         if first_write == True and len(df1) > 0:
             process_pheno_and_exclusions(MatchFI=MatchFI, df1=df1, df3=df3, df4=df4, iidcol=iidcol, verbose=verbose, ctype_excl=ctype_excl, ctype_incl=ctype_incl, Filter_YoB=Filter_YoB, Filter_Gender=Filter_Gender, use_predefined_exdep_exclusions=use_predefined_exdep_exclusions, RegisterRun=RegisterRun, dst=dst, ipsych_run=ipsych_run, dbds_run=dbds_run, cluster_run=cluster_run, exact_match=exact_match, skip_icd_update=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, qced_iids=qced_iids, general_exclusions=general_exclusions, multi_inclusions=multi_inclusions, in_pheno_codes=in_pheno_codes, pheno_requestcol=pheno_requestcol, diagnostic_col=diagnostic_col, atc_diag_col=atc_diag_col, birthdatecol=birthdatecol, atc_date_col=atc_date_col, atc_cols_to_read_as_date=atc_cols_to_read_as_date, atc_file=atc_file, fsep=fsep, BuildEntryExitDates=BuildEntryExitDates, lifetime_exclusions_file=lifetime_exclusions_file, post_exclusions_file=post_exclusions_file, oneYearPrior_exclusions_file=oneYearPrior_exclusions_file, outfile=outfile, write_Plink2_format=write_Plink2_format, write_fastGWA_format=write_fastGWA_format, write_pickle=write_pickle, n_stam_iids=n_stam_iids, exclCHBcontrols=exclCHBcontrols, iidstatus_col=iidstatus_col, addition_information_file=addition_information_file, sexcol=sexcol, input_date_in_name=input_date_in_name, input_date_out_name=input_date_out_name, append=False)
         elif len(df1) > 0:
@@ -3142,6 +3415,79 @@ def batch_load_df1_process_pheno_and_exclusions(lpr_file, batch_size, diagnostic
             #TODO IIDs without being case should still be included
             print(f"INFO: Skipping batch {batch_num + 1} as there are no overlapping cases.")
         first_write = False
+
+
+def BuildEntryExitDate(df1, df3, iidcol, input_date_in_name, input_date_out_name, verbose=False):
+    """
+    Estimate entry and exit dates for individuals based on the earliest and latest available diagnosis dates.
+
+    Parameters:
+    - df1: DataFrame containing the raw diagnosis dates.
+    - df3: DataFrame to which the entry/exit dates will be merged.
+    - iidcol: Column name representing the unique individual identifier.
+    - input_date_in_name: Preferred column name for the entry date.
+    - input_date_out_name: Preferred column name for the exit date.
+    - verbose: If True, prints debug information.
+    
+    Returns:
+    - Merged DataFrame with new 'Entry_Date' and 'Exit_Date' columns.
+    """
+    
+    if verbose:
+        print("Estimating the Entry and Exit date for Individuals based on the first and last available diagnosis dates.")
+
+    # Create a working copy of df1
+    tmp_entry_exit_df = df1.copy()
+
+    # Check if the preferred date column names exist; if not, use defaults if available
+    available_columns = tmp_entry_exit_df.columns.tolist()
+    if verbose:
+        print("Available columns:", available_columns)
+    
+    if input_date_in_name not in available_columns and "date_in" in available_columns:
+        input_date_in_name = "date_in"
+    if input_date_out_name not in available_columns and "date_out" in available_columns:
+        input_date_out_name = "date_out"
+    
+    # Build a list of columns to keep: only iidcol and the two date columns.
+    keep_cols = [iidcol, input_date_in_name]
+    if input_date_out_name != input_date_in_name:
+        keep_cols.append(input_date_out_name)
+
+    if verbose:
+        print("Keeping columns:", keep_cols)
+    
+    tmp_entry_exit_df = tmp_entry_exit_df[keep_cols]
+    
+    if verbose:
+        print("DataFrame after dropping unnecessary columns:\n", tmp_entry_exit_df.head())
+
+    # Group by individual id and calculate entry and exit dates
+    grouped = tmp_entry_exit_df.groupby(iidcol, group_keys=False)
+    in_dates = grouped[input_date_in_name].min().reset_index(name='Entry_Date')
+    
+    if input_date_out_name != input_date_in_name:
+        out_dates = grouped[input_date_out_name].max().reset_index(name='Exit_Date')
+    else:
+        out_dates = grouped[input_date_in_name].max().reset_index(name='Exit_Date')
+
+    if verbose:
+        print("Entry dates:\n", in_dates.head())
+        print("Exit dates:\n", out_dates.head())
+
+    # Merge entry and exit dates
+    entry_exit_date_df = in_dates.merge(out_dates, on=iidcol)
+    
+    if verbose:
+        print("Combined Entry/Exit DataFrame:\n", entry_exit_date_df.head())
+
+    # Merge with df3
+    df3_new = df3.merge(entry_exit_date_df, on=iidcol)
+    
+    if verbose:
+        print("Merged final DataFrame:\n", df3_new.head())
+    
+    return df3_new
 
 
 #need to handle double counts and exclusions
@@ -3178,6 +3524,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
     global lpr_recnummer
     global lpr2nd_recnummer
     global diagnostic2nd_col
+    global DayFirst
 
     lpr_recnummer = recnum
     lpr2nd_recnummer = recnum2
@@ -3206,6 +3553,8 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
     
     #Set Global variable based on input
     DateFormat = DateFormat_in
+    if DateFormat.startswith("%d"):
+        DayFirst=True
     if (Build_Test_Set):
         print("Generating a test dataset and store it in the directory selected with -o.",outfile)
         generate_test_dataset(outfile)
@@ -3277,6 +3626,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         opholdsep="\t"
         if (lpr_file == ''):
             DateFormat = "%d/%m/%Y"
+            DayFirst=True
             #stam_file = "/home/imlundberg/scripts/first1000.stamdata2016.csv"
             stam_file = "/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/stamdata2016.csv"
             stam_cols_to_read_as_date = ['fdato','statd','fdato_m','fdato_f','statd_m','statd_f']
@@ -3324,11 +3674,13 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         input_date_out_name='d_uddto'
         general_exclusions = ""
         DateFormat = "%d/%m/%Y"
+        DayFirst=True
         remove_point_in_diag_request = True
         remove_ICD_naming = True
 
     if (dbds_run or cluster_run == "CHB_DBDS"):
         DateFormat = "%Y-%m-%d"
+        DayFirst=False
         iidcol = "cpr_enc"
         fsep = "\t"
         gsep = "\t"
@@ -3392,21 +3744,27 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
 
     
     print (hostname+"; CHB/DBDS: "+str(dbds_run)+"; iPSYCH: "+str(ipsych_run)+"; TestRun: "+str(test_run)+"; Cluster: "+cluster_run)
+    potential_cols_to_read_as_date = [input_date_in_name,input_date_out_name,birthdatecol,"date_in","date_out","birthdate","date_of_birth"]
+    potential_lpr_cols_to_read_as_date = potential_cols_to_read_as_date
+    potential_stam_cols_to_read_as_date = potential_cols_to_read_as_date
     if (not lpr_cols_to_read_as_date):
         print("INFO: no -f dates supplied, checking predefined colnames.")
-        potential_lpr_cols_to_read_as_date = [input_date_in_name,input_date_out_name,birthdatecol,"date_in","date_out","birthdate","date_of_birth"]
     else:
         if not type(lpr_cols_to_read_as_date) == list:
             lpr_cols_to_read_as_date = lpr_cols_to_read_as_date.split(",")
         print("INFO: -f dates supplied, setting them now for later use: ",lpr_cols_to_read_as_date)
-    
+    lpr_cols_to_read_as_date = sorted(
+        set(lpr_cols_to_read_as_date + potential_lpr_cols_to_read_as_date)
+    )
     if (not stam_cols_to_read_as_date):
         print("INFO: no -i dates supplied, checking predefined colnames.")
-        potential_stam_cols_to_read_as_date = [input_date_in_name,input_date_out_name,birthdatecol,"date_in","date_out","birthdate","date_of_birth"]
     else:
         print("INFO: -i dates supplied, setting them now for later use.")
         if not type(stam_cols_to_read_as_date) == list:
             stam_cols_to_read_as_date = stam_cols_to_read_as_date.split(",")
+    stam_cols_to_read_as_date = sorted(
+        set(stam_cols_to_read_as_date + potential_cols_to_read_as_date)
+    )
 
     if (lpr_file == "" or pheno_request == "" or stam_file == ""):
         print("ERROR: Either lpr_file , stam_file or pheno_request file is not given. Exiting")
@@ -3426,7 +3784,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         df3 = pd.DataFrame() #stam file
         df4 = pd.DataFrame() #additional information file
         # Load input files
-        casecontrol_df = pd.read_csv(pheno_request, sep=fsep, dtype=object, parse_dates=lpr_cols_to_read_as_date)
+        casecontrol_df = pd.read_csv(pheno_request, sep=fsep, dtype=object, dayfirst=DayFirst, parse_dates=lpr_cols_to_read_as_date)
         print("#"*50)
         print("#"*50)
         print("INFO: You are loading pre-created phenotype files to then let us do some manipulation and combining them.")
@@ -3453,7 +3811,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 temp_df = pd.DataFrame()
                 # Iterate over each file path
                 for lifetimefile in file_paths:
-                    temp_df = pd.read_csv(lifetimefile, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date)
+                    temp_df = pd.read_csv(lifetimefile, sep=fsep, dtype=object, dayfirst=DayFirst, parse_dates=stam_cols_to_read_as_date)
                     # update the colnames so that the current disorder/disease will be reflected in the naming as it would be when running it from the start
                     # append the casecontrol_df with the current exclusion
 
@@ -3626,29 +3984,22 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 else:
                     # Identify the set of columns that are dates
                     try:
-                        df = pd.read_csv(stamfile, sep=fsep, dtype=object, nrows=0)
+                        df_header = pd.read_csv(stamfile, sep=fsep, dtype=object, nrows=0)
                     except TypeError:
-                        df = pd.read_csv(stamfile, sep=fsep, dtype=object, nrows=0, engine='python')
-                    if(df.columns.empty):
+                        df_header = pd.read_csv(stamfile, sep=fsep, dtype=object, nrows=0, engine='python')
+                    if(df_header.columns.empty):
                         print("ERROR: Could not load -i file: ",stamfile)
                         sys.exit()
                     if stam_cols_to_read_as_date:
-                        stam_cols_to_read_as_date = list(set([col for col in stam_cols_to_read_as_date if col in df.columns]))
-                    if not stam_cols_to_read_as_date:
-                        stam_cols_to_read_as_date = list(set([col for col in potential_stam_cols_to_read_as_date if col in df.columns]))
-                    if stam_cols_to_read_as_date:
-                        df = pd.read_csv(stamfile, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date)
-                        #try:
-                        #    df = pd.read_csv(stamfile, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date, date_format=DateFormat)
-                        #except TypeError:
-                        #    df = pd.read_csv(stamfile, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date)
-                        #    for col in stam_cols_to_read_as_date:
-                        #        df[col] = df[col].apply(lambda x: convert_if_not_datetime(x) if pd.notnull(x) else pd.NaT) #df[col] = pd.to_datetime(df[col], format=DateFormat, errors='coerce')
+                        stam_cols_to_read_as_date = list(set([col for col in stam_cols_to_read_as_date if col in df_header]))
+                        print("INFO: We identified the following columns to be present and to be used as date columns: ",stam_cols_to_read_as_date)  
+                        df = pd.read_csv(stamfile, sep=fsep, dtype=object, dayfirst=DayFirst, parse_dates=stam_cols_to_read_as_date)
                     else:
                         try:
-                            df = pd.read_csv(stamfile, sep=fsep, dtype=str)
+                            df = pd.read_csv(stamfile, sep=fsep)
                         except TypeError:
                             df = pd.read_csv(stamfile, sep=fsep, engine='python', dtype=str)
+                    del(df_header)
                 df3 = pd.concat([df3, df], ignore_index=True, sort=False)
                 del(df)
             del(stamfile)
@@ -3658,39 +4009,24 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             if dta_input:
                 df3 = pd.read_stata(stam_file)
             else:
+                try:
+                    df_header = pd.read_csv(stam_file, sep=fsep, dtype=object, nrows=0)
+                except TypeError:
+                    df_header = pd.read_csv(stam_file, sep=fsep, dtype=object, nrows=0, engine='python')
+                if(df_header.columns.empty):
+                    print("ERROR: Could not load -i file: ",stam_file)
+                    sys.exit()
                 if stam_cols_to_read_as_date:
-                    df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date)
-                    #try:
-                    #    df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date, date_format=DateFormat)
-                    #except TypeError:
-                    #    df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, parse_dates=stam_cols_to_read_as_date)
+                    stam_cols_to_read_as_date = list(set([col for col in stam_cols_to_read_as_date if col in df_header]))
+                    print("INFO: We identified the following columns to be present and to be used as date columns: ",stam_cols_to_read_as_date)
+                    df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, dayfirst=DayFirst, parse_dates=stam_cols_to_read_as_date)
                 else:
-                    # Identify the set of columns that are dates
                     try:
-                        df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, nrows=0)
-                    except TypeError:
-                        df3 = pd.read_csv(stam_file, sep=fsep, engine='python', dtype=object, nrows=0)
-                    if(df3.columns.empty):
-                        print("ERROR: Could not load -i file: ",stam_file)
-                        sys.exit()
-                    available_date_cols = list(set([col for col in potential_stam_cols_to_read_as_date if col in df3.columns]))
-                    print("INFO: No cols supplied (stam) that should be read as dates. Trying to infer them: ",available_date_cols)
-                    if available_date_cols:
-                        try:
-                            df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, parse_dates=available_date_cols)
-                        except Exception as e:
-                            print(f"WARNING: Failed to parse dates from {available_date_cols}. Error: {e}")
-                            df3 = pd.read_csv(stam_file, sep=fsep, dtype=object)
-                            
-                        # Ensure correct date format after reading
-                        for col in available_date_cols:
-                            df3[col] = df3[col].apply(lambda x: convert_if_not_datetime(x) if pd.notnull(x) else pd.NaT) #df3[col] = pd.to_datetime(df3[col], errors='coerce', format=DateFormat)
-                    else:
-                        try:
-                            df3 = pd.read_csv(stam_file, sep=fsep, dtype=str)
-                        except Exception as e:
-                            print(f"WARNING: Failed to read CSV with dtype=str. Error: {e}")
-                            df3 = pd.read_csv(stam_file, sep=fsep, engine='python', dtype=str)
+                        df3 = pd.read_csv(stam_file, sep=fsep)
+                    except Exception as e:
+                        print(f"WARNING: Failed to read CSV with dtype=str. Error: {e}")
+                        df3 = pd.read_csv(stam_file, sep=fsep, engine='python', dtype=str)
+                del(df_header)
         print("Info: Finished loading -i file(s)")
         if verbose:
             print(f"Header of your -i file: {df3.head(5)}")
@@ -3858,6 +4194,9 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             if (len(df1) > len(df1[iidcol].unique())):
                 print("WARNING: Your input file -f contains duplicated IIDs. This basically means, that each IID is given multiple times, potentially due to multiple diagnostic codes (then it is normal). If this should not be the case, please check your input!")
             
+            if BuildEntryExitDates:
+                df3 = BuildEntryExitDate(df1, df3, iidcol, input_date_in_name, input_date_out_name, verbose)
+
             print("Pheno request: ",in_pheno_codes)
             print("Original Pheno request: ",orig_pheno_request)
             process_pheno_and_exclusions(MatchFI=MatchFI, df1=df1, df3=df3, df4=df4, iidcol=iidcol, verbose=verbose, ctype_excl=ctype_excl, ctype_incl=ctype_incl, Filter_YoB=Filter_YoB, Filter_Gender=Filter_Gender, use_predefined_exdep_exclusions=use_predefined_exdep_exclusions, RegisterRun=RegisterRun, dst=dst, ipsych_run=ipsych_run, dbds_run=dbds_run, cluster_run=cluster_run, exact_match=exact_match, skip_icd_update=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, qced_iids=qced_iids, general_exclusions=general_exclusions, multi_inclusions=multi_inclusions, in_pheno_codes=in_pheno_codes, pheno_requestcol=pheno_requestcol, diagnostic_col=diagnostic_col, atc_diag_col=atc_diag_col, birthdatecol=birthdatecol, atc_date_col=atc_date_col, atc_cols_to_read_as_date=atc_cols_to_read_as_date, atc_file=atc_file, fsep=fsep, BuildEntryExitDates=BuildEntryExitDates, lifetime_exclusions_file=lifetime_exclusions_file, post_exclusions_file=post_exclusions_file, oneYearPrior_exclusions_file=oneYearPrior_exclusions_file, outfile=outfile, write_Plink2_format=write_Plink2_format, write_fastGWA_format=write_fastGWA_format, write_pickle=write_pickle, n_stam_iids=n_stam_iids, exclCHBcontrols=exclCHBcontrols, iidstatus_col=iidstatus_col, addition_information_file=addition_information_file, sexcol=sexcol, input_date_in_name=input_date_in_name, input_date_out_name=input_date_out_name, append=False)
@@ -3909,8 +4248,8 @@ if __name__ == '__main__':
     parser.add_argument('--noLeadingICD', action='store_true', help='Set this, if your diagnostic codes in \"-g\" do have a leading ICD*:, but your \"-f\" does not. This will only take affect together with --ExDepExc.')
     parser.add_argument('--ICDCM', action='store_true', help='Set this, if your Cohort is based on ICD10/9-CM codes and not base WHO. This will only take affect together with --ExDepExc.')
     parser.add_argument('--iidstatus', default='', help='Information about the status of the IID, i.e. if they withdrew their consent (), moved outside the country (), or died (). Default: "%(default)s"'),
-    parser.add_argument('--DiagTypeExclusions', default='', help='List of diagnostic types to exclude. e.g. \"H,M\". Potential c_types may be +,A,B,C,G,M,H. Default: "%(default)s"'),
-    parser.add_argument('--DiagTypeInclusions', default='', help='List of diagnostic types to include. e.g. \"A,B\". Potential c_types may be +,A,B,C,G,M,H. Default: "%(default)s"'),
+    parser.add_argument('--DiagTypeExclusions', default='', help='List of diagnostic types to exclude. e.g. \"H,M\". Potential c_types may be +,A,B,C,G,M,H. \nA (main diagnosis), B (secondary diagnosis), G (grundmorbus), H (referral), + (secondary diagnosis), C (complication), and M (temporary) are all possible diagnosis types.\nFrom 1995 to 1998, registering a referral diagnosis (H) was optional; thereafter, it became mandatory for certain referral methods. Grundmorbus (G) was optional from 1995 to 2001, used exclusively for psychiatric patients in 2002–2003, and then discontinued entirely. Complication (C) and temporary diagnosis (M) were both discontinued at the end of 2013. \nDefault: "%(default)s"'),
+    parser.add_argument('--DiagTypeInclusions', default='', help='List of diagnostic types to include. e.g. \"A,B\". Potential c_types may be +,A,B,C,G,M,H. \nA (main diagnosis), B (secondary diagnosis), G (grundmorbus), H (referral), + (secondary diagnosis), C (complication), and M (temporary) are all possible diagnosis types.\nFrom 1995 to 1998, registering a referral diagnosis (H) was optional; thereafter, it became mandatory for certain referral methods. Grundmorbus (G) was optional from 1995 to 2001, used exclusively for psychiatric patients in 2002–2003, and then discontinued entirely. Complication (C) and temporary diagnosis (M) were both discontinued at the end of 2013. \nDefault: "%(default)s"'),
     parser.add_argument('--LifetimeExclusion', default='', help='Define Lifetime exclusions (if a case has any of the listed codes, it will be excluded). This should be a file containing either one row with all codes listed (comma separated) or per row a exclusion name, followed by a list of diagnostic codes (similar to the input). e.g. "BPD\tICD10:F30,ICD10:F30.0,ICD10:F30.1,ICD10:F30.2,ICD10:F30.8,ICD10:F30.9,ICD10:F31,ICD10:F31.0,ICD10:F31.1,ICD10:F31.2,ICD10:F31.3,ICD10:F31.4,ICD10:F31.5,ICD10:F31.6,ICD10:F31.7,ICD10:F31.8,ICD10:F31.9"\nIf you are using CHB/DBDS data, please remember, that the ICD10 codes have to start with ICD10:D***, e.g. ICD10:DF33.0. Default: "%(default)s"'),
     parser.add_argument('--PostExclusion', default='', help='Define Post exclusions (if a case has any of the listed codes, all main diagnoses after the first occuring date of the listed codes will be excluded). This should be a file containing either one row with all codes listed (comma separated) or  per row a exclusion name, followed by a list of diagnostic codes (similar to the input). Default: "%(default)s"'),
     parser.add_argument('--OneyPriorExclusion', default='', help='Define One Year Prio exclusions (all entries for a case that happen within one year prior to any date of the listed codes, these entries will be excluded). This should be a file containing either one row with all codes listed (comma separated) or  per row a exclusion name, followed by a list of diagnostic codes (similar to the input). Default: "%(default)s"'),

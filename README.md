@@ -68,6 +68,10 @@ optional arguments:
   -o O                  Outfile name; dont forget to add the location, otherwise it will be saved in the local dir.
   -f F                  Diagnosis file. Should have at least "IID", "date_in", "date_out", and "diagnosis" as columns. Names can be defined using --iidcol, --din, --don, and --fcol. No default. Will be automatically determined if not entered for
                         GenomeDK and CHB/DBDS (DEGEN protocol)
+  --f2 F2               Secondary diagnosis file. This is meant to be used if you have files with secondary diagnosis information as i.e. in Denmark. Here we would usually use the 'recnum' to merge these entries with '-f'. These files also contain
+                        less information as the '-f' files. Should have at least "recnum", and "diagnosis" as columns. Names can be defined using --recnum2 and --f2col. The recnum column in the '-f' files can be specified using --recnum. Default:
+                        ""
+  --atc ATC             PRescription information file. Will be handeld simillar to -f but needs additional information to be specified: --atccol. Default: ""
   -i I                  This file should adds based on a mapping using the supplied "IID" column information about Gender/Sex (needed), Brithdate (needed) ... e.g., information from stamdata file. No default. Will be automatically determined if not
                         entered for GenomeDK and CHB/DBDS (DEGEN protocol)
   -j J                  This file should have additional "IID" information e.g. date of entry to cohort. This is not needed and can also be skipped. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN
@@ -80,10 +84,14 @@ optional arguments:
   --iidcol IIDCOL       Columname of IDs in -f and -i file. Defaulting to "pnr" (or cpr_enc in CHB/DBDS)
   --bdcol BDCOL         Columname of Birthdate in files. Defaults to "birthdate"
   --sexcol SEXCOL       Columname of Sex/Gender in files. Defaults to "sex"
+  --atccol ATCCOL       Columname of ATC codes in files. Defaults to ""
   --fsep FSEP           Separator of -f i.e. tab; default "," (or "\t" in CHB/DBDS)
   --gsep GSEP           Separator of -g i.e. tab; default "," (or "\t" in CHB/DBDS)
   --din DIN             Columname of first diagnosis date. e.g. 'd_inddto' or 'date_in'. Default: "d_inddto" (or 'date_in' in CHB/DBDS)
   --don DON             Columname of first diagnosis date. e.g. 'd_uddto' or 'date_out'. Default: "d_uddto" (or 'date_out' in CHB/DBDS)
+  --recnum RECNUM       Columname of the recnum field in -f files. Default: "" (or 'recnum' on NCRR)
+  --recnum2 RECNUM2     Columname of the recnum field in -f files. Default: "" (or 'recnum' on NCRR)
+  --f2col F2COL         Columname of first diagnosis date. e.g. 'd_uddto' or 'date_out'. Default: "c_adiag" (or 'date_out' in CHB/DBDS)
   --ExDepExc            List of diagnostic codes to exclude (e.g. Cases holding also these codes will be excluded). This is currently precoded and will be changed to allowing to specify a file with codes.
   --eM                  Exact Match. If the ICD or diagnosis code should max exactly and not e.g. searching for ICD:F33 and receiving ICD:F331, ICD:F33, ICD:F339 and so on.
   --noLeadingICD        Set this, if your diagnostic codes in "-g" do have a leading ICD*:, but your "-f" does not. This will only take affect together with --ExDepExc.
@@ -91,9 +99,13 @@ optional arguments:
   --iidstatus IIDSTATUS
                         Information about the status of the IID, i.e. if they withdrew their consent (), moved outside the country (), or died (). Default: ""
   --DiagTypeExclusions DIAGTYPEEXCLUSIONS
-                        List of diagnostic types to exclude. e.g. "H,M". Potential c_types may be +,A,B,C,G,M,H. Default: ""
+                        List of diagnostic types to exclude. e.g. "H,M". Potential c_types may be +,A,B,C,G,M,H. A (main diagnosis), B (secondary diagnosis), G (grundmorbus), H (referral), + (secondary diagnosis), C (complication), and M
+                        (temporary) are all possible diagnosis types. From 1995 to 1998, registering a referral diagnosis (H) was optional; thereafter, it became mandatory for certain referral methods. Grundmorbus (G) was optional from 1995 to
+                        2001, used exclusively for psychiatric patients in 2002–2003, and then discontinued entirely. Complication (C) and temporary diagnosis (M) were both discontinued at the end of 2013. Default: ""
   --DiagTypeInclusions DIAGTYPEINCLUSIONS
-                        List of diagnostic types to include. e.g. "A,B". Potential c_types may be +,A,B,C,G,M,H. Default: ""
+                        List of diagnostic types to include. e.g. "A,B". Potential c_types may be +,A,B,C,G,M,H. A (main diagnosis), B (secondary diagnosis), G (grundmorbus), H (referral), + (secondary diagnosis), C (complication), and M
+                        (temporary) are all possible diagnosis types. From 1995 to 1998, registering a referral diagnosis (H) was optional; thereafter, it became mandatory for certain referral methods. Grundmorbus (G) was optional from 1995 to
+                        2001, used exclusively for psychiatric patients in 2002–2003, and then discontinued entirely. Complication (C) and temporary diagnosis (M) were both discontinued at the end of 2013. Default: ""
   --LifetimeExclusion LIFETIMEEXCLUSION
                         Define Lifetime exclusions (if a case has any of the listed codes, it will be excluded). This should be a file containing either one row with all codes listed (comma separated) or per row a exclusion name, followed by a list
                         of diagnostic codes (similar to the input). e.g. "BPD
@@ -140,6 +152,8 @@ optional arguments:
   --lowmem              Experimental! - This will devide the LPR file into groups of each 100.000 individuals, run the phenotype on them, save it to file and then run the nex 100k until the end. This will increase the runtime.
   --batchsize BATCHSIZE
                         Experimental! - This will set the batches (when --lowmem is set) to the desired value. Default: "100000"
+  --PSYK                Experimental! - To run only based on the PSYK diagnoses.
+  --LPR                 Experimental! - To run only based on the LPR diagnoses.
   --verbose             Verbose output
 
 ```

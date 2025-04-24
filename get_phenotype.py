@@ -3317,7 +3317,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         print("Finished generating the test data. It is stored in the directory selected with -o.")
         sys.exit()
 
-    cluster_run = ""
+    cluster_run = "Default"
     # Register (True) or CHB/DBDS run (False) determine this based on the assumption, that all DBDS.CHB runs will have as hostname cld065
     dbds_run = False
     # Get the local hostname
@@ -3348,7 +3348,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         cluster_run = "IBP_computerome"
     dst=False
 
-    if (cluster_run in ("NCRR_DST", "IBP_computerome", "iPSYCH", "CHB_DBDS") and inifile == ""):
+    if (cluster_run in ("NCRR_DST", "IBP_computerome", "iPSYCH", "CHB_DBDS", "Default") and inifile == ""):
         inifile = "get_pheno.ini"
 
     # Load the configuration

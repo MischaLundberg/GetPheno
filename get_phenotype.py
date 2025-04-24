@@ -17,8 +17,11 @@ import random
 from concurrent.futures import ThreadPoolExecutor
 import pickle
 import subprocess
+import configparser
 from packaging.version import Version, parse
 
+# Pre-compiled regex for splitting ICD strings.
+SPLIT_PATTERN = re.compile(r"^([A-Za-z]+)(\d+)(?:\.(\d+))?")
 python_min_version = "3.8.1"
 pd_min_version = "1.3.4"
 DateFormat = "%Y-%m-%d"
@@ -627,11 +630,8 @@ def generate_test_dataset(odir):
 
 def split_and_format(input_str, fill=False):
     # Use regex to split the string into letter, integer, and decimal parts
-    if ":" in input_str:
-        match = re.match(r"([A-Za-z]+)(\d+)(?:\.(\d+))?", input_str)
-    else:
-        match = re.match(r"([A-Za-z]*)(\d+)(?:\.(\d+))?", input_str)
-    
+    match = SPLIT_PATTERN.match(input_str)
+
     if match:
         string_part = str(match.group(1))
         integer_part = str(match.group(2))
@@ -674,499 +674,194 @@ def remove_leading_icd(entry):
                 return entry[len(prefix):]
     return entry
 
-def format_numeric(entry, remove_leading, eM, prefix='ICD8:'):
+def format_numeric(entry, Mode):
     """Formats a numeric entry as an ICD8 code."""
+    # Set flag eM only if the mode is one of the specified ones.
+    eM = Mode in ("DBDS", "RegisterRun", "IPSYCH")
     entry_str = str(entry)
     integer_part, sep, decimal_part = entry_str.partition('.')
-    integer_part = integer_part.zfill(3)
-    # Only pad the decimal part if present and eM is true
+    # For the specified modes, pad the integer part to 3 digits.
+    integer_formatted = integer_part.zfill(3) if eM and integer_part else integer_part
+    # Pad the decimal part only if present and eM is True.
     decimal_formatted = decimal_part.zfill(2) if eM and decimal_part else decimal_part
-    result = f"{integer_part}.{decimal_formatted}"
-    if not remove_leading:
-        result = prefix + result
-    return result
+    return f"{integer_formatted}.{decimal_formatted}"
 
-def process_icd8(entry, remove_leading, eM):
-    """Processes an ICD8 entry."""
-    if isinstance(entry, str):
-        entry = entry.replace('ICD8:', '', 1) if remove_leading else entry
-    return format_numeric(entry, remove_leading, eM, prefix='ICD8:')
+    
+def process_entry(entry, remove_leading, eM, mode, prefix, remove_point):
+    """
+    Process a single ICD entry based on the mode.
+    Modes: "ICDCM", "DBDS", "RegisterRun", "IPSYCH", "DBDS", "default"
+    The prefix variable is used when adjusting ICD10 entries.
+    """
+    # Handle non-string numeric entries
+    if not isinstance(entry, str):
+        if isinstance(entry, (int, float)) and str(entry).isdigit():
+            print("Warning: Integer given without information about underlying ICD definition. This will be interpreted as ICD8. Otherwise state ICD9:ZZZ.ZZ or ICD8:ZZZ.ZZ")
+            return format_numeric(entry, mode)
+        return str(entry).replace('.', '') if remove_point else entry
 
-def process_icd9_cm(entry, remove_leading):
-    """Processes an ICD9-CM entry."""
-    entry_str = entry.replace('ICD9-CM:', '', 1).upper()
-    return entry_str if remove_leading else 'ICD9:' + entry_str
+    # ICD8 processing common to several modes
+    if entry.startswith("ICD8:"):
+        if mode in ("DBDS", "RegisterRun", "IPSYCH"):
+            new_entry = entry.replace("ICD8:", "", 1)
+            res = format_numeric(new_entry, mode)
+            return "ICD8:" + res.replace('.', '')
+        return entry.replace('.', '') if remove_point else entry
+    
+    # ATC entries are passed through (with minor adjustments in some modes)
+    if entry.startswith("ATC:"):
+        res = entry
+        if mode in ("DBDS", "RegisterRun", "IPSYCH") or remove_leading:
+            res = entry.replace("ATC:", "", 1)
+            if mode in ("DBDS", "RegisterRun", "IPSYCH"):
+                res = result.upper().replace('.', '')
+        return res.replace('.', '') if remove_point else res
 
-def process_icd10_cm(entry, remove_leading):
-    """Processes an ICD10-CM entry."""
-    entry_str = entry.replace('ICD10-CM:', '', 1).upper()
-    return entry_str if remove_leading else 'ICD10:' + entry_str
+    # Process ICD9-CM and ICD10-CM for ICDCM and skip in other modes
+    if entry.startswith("ICD9-CM:"):
+        if mode in ("ICDCM","default"):
+            res = entry.replace("ICD9-CM:", "", 1).upper()
+            res = res if remove_leading else "ICD9:" + res
+            return res.replace('.', '') if remove_point else res
+        return None  # skip in other modes
+    if entry.startswith("ICD10-CM:"):
+        if mode in ("ICDCM","default"):
+            res = entry.replace("ICD10-CM:", "", 1).upper()
+            res = res if remove_leading else "ICD10:" + res
+            return res.replace('.', '') if remove_point else res
+        return None  # skip in other modes
 
-def process_entry_icdcm(entry, remove_leading, eM):
-    """Processing branch for ICDCM (ICD10CM without dbdschb, ipsych, dst)."""
-    if isinstance(entry, str):
-        if entry.startswith('ATC:'):
-            return entry
-        elif entry.startswith('ICD8:'):
-            return process_icd8(entry, remove_leading, eM)
-        elif entry.startswith('ICD9-CM:'):
-            return process_icd9_cm(entry, remove_leading)
-        elif entry.startswith('ICD10-CM:'):
-            return process_icd10_cm(entry, remove_leading)
-    if isinstance(entry, (int, float)) and str(entry).isdigit():
-        return format_numeric(entry, remove_leading, eM, prefix='ICD8:')
-    return entry
-
-def process_entry_dbds(entry, remove_leading, eM):
-    """Processing branch for DBDS/CHB data."""
-    if isinstance(entry, str):
-        if entry.startswith('ATC:'):
-            return entry.replace('ATC:', '', 1).upper()
-        elif entry.startswith(('ICD9-CM:', 'ICD10-CM:', 'ICD9:')):
-            return None  # Skip this entry
-        elif entry.startswith('ICD8:'):
-            # Convert to uppercase and format
-            entry_str = entry.upper()
-            integer_part, _, decimal_part = entry_str.partition('.')
-            integer_part = integer_part.zfill(3)
-            return f"{integer_part}.{decimal_part.zfill(2) if eM and decimal_part else decimal_part}"
-        elif not str(entry).isdigit() and not entry.startswith(('ICD10:', 'ICD10:D')):
-            if re.match(r'^[A-Z]{2}\d', entry, re.IGNORECASE):
-                return 'ICD10:' + entry.upper()
-            elif re.match(r'^[A-Z]\d', entry, re.IGNORECASE):
-                return 'ICD10:D' + entry.upper()
-            else:
-                print(f"{entry} has more than two letters before a numeric value. Leaving as is.")
-                return entry
-        elif entry.startswith('ICD10:') and not entry.startswith('ICD10:D'):
-            return 'ICD10:D' + entry.replace('ICD10:', '', 1).upper()
-        elif entry.startswith('ICD10:D'):
-            return 'ICD10:' + entry.replace('ICD10:', '', 1).upper()
-    if isinstance(entry, (int, float)) and str(entry).isdigit():
-        return format_numeric(entry, remove_leading, eM, prefix='ICD8:')
-    return entry.replace('.', '') if isinstance(entry, str) else entry
-
-def process_entry_register(entry, remove_leading, eM):
-    """Processing branch for RegisterRun."""
-    if isinstance(entry, str):
-        if entry.startswith('ATC:'):
-            return entry
-        elif entry.startswith(('ICD9-CM:', 'ICD10-CM:')):
+    # For ICD9 (non-CM) – only RegisterRun skips these
+    if entry.startswith("ICD9:"):
+        if mode in ("DBDS", "RegisterRun", "IPSYCH"):
             return None
-        elif entry.startswith('ICD8:'):
-            new_entry = entry.replace('ICD8:', '', 1)
-            return process_icd8(new_entry, True, eM)
-        elif entry.startswith('ICD9:') and not entry.startswith('ICD9-CM:'):
-            return None
-        elif not str(entry).isdigit() and not entry.startswith(('ICD10:', 'ICD10:D')):
-            if re.match(r'^[A-Z]{2}\d', entry, re.IGNORECASE):
-                return entry.upper()
-            elif re.match(r'^[A-Z]\d', entry, re.IGNORECASE):
-                return 'D' + entry.upper()
-            else:
-                print(f"{entry} has more than two letters before a numeric value. Leaving as is.")
-                return entry
-        elif entry.startswith('ICD10:') and not entry.startswith(('ICD10:D', 'ICD10-CM:')):
-            return 'D' + entry.replace('ICD10:', '', 1).upper()
-        elif not entry.startswith('ICD10:') and entry.startswith('ICD10:D') and not entry.startswith('ICD10-CM:'):
-            return entry.replace('ICD10:', '', 1).upper()
-    if isinstance(entry, (int, float)) and str(entry).isdigit():
-        new_entry = format_numeric(entry, remove_leading, eM, prefix='ICD8:')
-        return new_entry.replace('.', '')
-    return entry
+        res = entry.replace("ICD9:", "", 1).upper()
+        res = res if remove_leading else "ICD9:" + res
+        return res.replace('.', '') if remove_point else res
 
-def process_entry_ipsych(entry, remove_leading, eM):
-    """Processing branch for ipsych or dst."""
-    if isinstance(entry, str):
-        if entry.startswith('ATC:'):
-            return entry
-        elif entry.startswith(('ICD9-CM:', 'ICD10-CM:')):
-            return None
-        elif entry.startswith('ICD8:'):
-            new_entry = entry.replace('ICD8:', '', 1)
-            return process_icd8(new_entry, True, eM)
-        elif entry.startswith('ICD9:') and not entry.startswith('ICD9-CM:'):
-            return None
-        elif not str(entry).isdigit() and not entry.startswith(('ICD10:', 'ICD10:D')):
-            # Use regex to decide whether to add a D prefix or not
-            if re.match(r'^[A-Z]{2}\d', entry, re.IGNORECASE):
-                result = entry.upper()
-            elif re.match(r'^[A-Z]\d', entry, re.IGNORECASE):
-                result = 'D' + entry.upper()
+    # Process ICD10 entries – behavior may differ if a custom prefix is desired.
+    if entry.startswith("ICD10:"):
+        # In RegisterRun and IPSYCH modes we add or check the custom prefix:
+        if mode in ("DBDS", "RegisterRun", "IPSYCH"):
+            # If the entry does not already have the custom prefix, add it.
+            if not entry.startswith(f"ICD10:{prefix}"):
+                res = prefix + entry.replace("ICD10:", "", 1).upper()
             else:
-                print(f"{entry} has more than two letters before a numeric value. Leaving as is.")
-                result = entry
-            # Assumes split_and_format is defined elsewhere
-            return split_and_format(result, fill=eM)
-        elif entry.startswith('ICD10:') and not str(entry).isdigit():
-            if re.match(r'^ICD10:D[A-Z]\d+', entry, re.IGNORECASE):
-                result = entry.replace('ICD10:D', '', 1).upper()
-            elif re.match(r'^ICD10:[A-Z]\d+', entry, re.IGNORECASE):
-                result = 'D' + entry.replace('ICD10:', '', 1).upper()
-            else:
-                print(f"{entry} has more than two letters before a numeric value. Leaving as is.")
-                result = entry
-            return split_and_format(result, fill=eM)
-    if isinstance(entry, (int, float)) and str(entry).isdigit():
-        return format_numeric(entry, remove_leading, eM, prefix='ICD8:')
-    return entry.replace('.', '') if isinstance(entry, str) else entry
-
-def process_entry_default(entry, remove_leading, eM, remove_point, RegisterRun):
-    """Default processing branch."""
-    if isinstance(entry, str):
-        if entry.upper().startswith('ATC:'):
-            result = entry
-        elif entry.upper().startswith('ICD8'):
-            result = entry.replace('ICD8:', '', 1) if remove_leading else entry
-        elif entry.upper().startswith('ICD9'):
-            result = entry.replace('ICD9:', '', 1) if remove_leading else entry
-        elif entry.upper().startswith('ICD10'):
-            result = entry.replace('ICD10:', '', 1) if remove_leading else entry
-        elif entry.upper().startswith('ICD9-CM'):
-            result = entry.replace('ICD9-CM:', '', 1) if remove_leading else entry
-        elif entry.upper().startswith('ICD10-CM'):
-            result = entry.replace('ICD10-CM:', '', 1) if remove_leading else entry
-        elif entry.upper().startswith('ICD9CM'):
-            result = entry.replace('ICD9CM:', '', 1) if remove_leading else entry
-        elif entry.upper().startswith('ICD10CM'):
-            result = entry.replace('ICD10CM:', '', 1) if remove_leading else entry
+                res = entry.replace("ICD10:", "", 1).upper()
+            # For IPSYCH, further formatting with split_and_format is assumed.
+            if mode == "IPSYCH":
+                return split_and_format(res, fill=eM).replace('.', '')
+            return res.replace('.', '')
         else:
-            result = entry
-    else:
-        result = entry
-    if isinstance(result, (int, float)) and str(result).isdigit():
-        result = result
-    if remove_point or RegisterRun:
-        if isinstance(result, str):
-            result = result.replace('.', '')
+            # For ICDCM and default modes, just remove the prefix if requested.
+            res = entry.replace("ICD10:", "", 1).upper()
+            res = res if remove_leading else "ICD10:" + res
+            return res.replace('.', '') if remove_point else res
+
+    # For entries that do not start with an ICD prefix:
+    # In RegisterRun and IPSYCH modes, try to determine if a prefix is needed using regex.
+    if mode in ("DBDS", "RegisterRun", "IPSYCH") and not entry.isdigit():
+        if re.match(r'^[A-Z]{2}\d', entry, re.IGNORECASE):
+            result = entry.upper().replace('.', '')
+        elif re.match(r'^[A-Z]\d', entry, re.IGNORECASE):
+            result = prefix + entry.upper().replace('.', '')
+        else:
+            print(f"{entry} has more than two letters before a numeric value. Leaving as is.")
+            result = entry.replace('.', '')
+        if mode == "IPSYCH":
+            return split_and_format(result, fill=eM).replace('.', '')
+        return result
+
+    # Default processing: remove known prefixes if requested.
+    result = entry
+    for tag in ["ATC:", "ICD8:", "ICD9:", "ICD10:", "ICD9-CM:", "ICD10-CM:", "ICD9CM:", "ICD10CM:"]:
+        if result.upper().startswith(tag.upper()):
+            result = result.replace(tag, "", 1) if remove_leading else result
+            break
+
+    if remove_point or mode in ("RegisterRun", "DBDS", "IPSYCH"):
+        result = result.replace('.', '')
     return result
+
+def remove_leading_icd(entry):
+    """If the entry starts with any known ICD prefix, remove it once."""
+    prefixes = ['ICD10:', 'ICD10-CM:', 'ICD9:', 'ICD9-CM:', 'ICD8:']
+    if isinstance(entry, str):
+        for prefix in prefixes:
+            if entry.startswith(prefix):
+                return entry[len(prefix):]
+    return entry
 
 def update_icd_coding(data, dst=False, dbdschb=False, ipsych=False, eM=False,
                       skip=False, remove_point_in_diag_request=False,
-                      ICDCM=False, RegisterRun=False, no_Fill=False, noLeadingICD=False):
+                      ICDCM=False, RegisterRun=False, no_Fill=False, noLeadingICD=False,
+                      prefix="D"):
+    """
+    Updates the ICD coding for a list or DataFrame of entries.
+    
+    Parameters:
+      - data: list or DataFrame containing the entries.
+      - dst, dbdschb, ipsych, ICDCM, RegisterRun: booleans that determine the processing mode.
+      - eM: flag passed to formatting functions.
+      - remove_point_in_diag_request: if True, remove periods.
+      - noLeadingICD: if True, remove any remaining ICD prefixes after processing.
+      - prefix: custom prefix string to be used for ICD10 entries (replaces the default "D").
+    """
     if skip:
         return data
+
     output_list = []
-    # (ATC_Requested is assumed to be a global variable defined elsewhere)
-    global ATC_Requested
     print_which_section = True
-
-    # Ensure data is a list
-    if not isinstance(data, list):
-        data = data[data.columns[0]].values.tolist()
-
-    # Decide which processing mode to use
+    # Determine mode priority.
     if ICDCM and not dbdschb and not ipsych and not dst:
-        mode = 'ICDCM'
+        mode = "ICDCM"
         if print_which_section:
             print("In ICD10CM ICDupdate")
             print_which_section = False
     elif dbdschb:
-        mode = 'DBDS'
+        mode = "DBDS"
         if print_which_section:
             print("In DBDS ICDupdate")
             print_which_section = False
     elif RegisterRun:
-        mode = 'RegisterRun'
+        mode = "RegisterRun"
         if print_which_section:
             print("RegisterRun: focusing on ICD10 and ICD8 input data")
             print_which_section = False
     elif ipsych or dst:
-        mode = 'IPSYCH'
+        mode = "IPSYCH"
         if print_which_section:
             print("In ipsych or dst ICDupdate")
             print_which_section = False
     else:
-        mode = 'default'
+        mode = "default"
         if print_which_section:
             print("In ELSE ICDupdate")
             print_which_section = False
 
-    for entry in data:
-        skipEntry = False
-        if mode == 'ICDCM':
-            entry = process_entry_icdcm(entry, noLeadingICD, eM)
-        elif mode == 'DBDS':
-            new_entry = process_entry_dbds(entry, noLeadingICD, eM)
-            if new_entry is None:
-                skipEntry = True
-            else:
-                entry = new_entry
-        elif mode == 'RegisterRun':
-            new_entry = process_entry_register(entry, noLeadingICD, eM)
-            if new_entry is None:
-                skipEntry = True
-            else:
-                entry = new_entry
-        elif mode == 'IPSYCH':
-            new_entry = process_entry_ipsych(entry, noLeadingICD, eM)
-            if new_entry is None:
-                skipEntry = True
-            else:
-                entry = new_entry
-        else:
-            entry = process_entry_default(entry, noLeadingICD, eM,
-                                          remove_point_in_diag_request, RegisterRun)
+    # Convert data to a list of entries.
+    if not isinstance(data, list):
+        data = data.iloc[:, 0].tolist()
 
-        # Final pass to remove any leading ICD prefixes if requested
-        if noLeadingICD and isinstance(entry, str):
-            entry = remove_leading_icd(entry)
-        if not skipEntry:
-            output_list.append(entry)
-        # For DBDS or ipsych modes, remove any -CM entries
-        if dbdschb or ipsych:
-            output_list = [entry for entry in output_list 
-                           if not (isinstance(entry, str) and (entry.startswith('ICD10-CM:') or entry.startswith('ICD9-CM:')))]
+    # Use a list comprehension to process entries while filtering out those that return None.
+    output_list = [
+        # Remove any remaining leading ICD prefixes if noLeadingICD is True.
+        remove_leading_icd(processed) if (noLeadingICD and isinstance(processed, str)) else processed
+        for processed in (
+            process_entry(entry, noLeadingICD, eM, mode, prefix, remove_point_in_diag_request)
+            for entry in data
+        )
+        if processed is not None
+    ]
+
+
+    # For DBDS or IPSYCH modes, remove any entries starting with ICD10-CM or ICD9-CM
+    if mode in ("DBDS", "IPSYCH"):
+        output_list = [entry for entry in output_list 
+                       if not (isinstance(entry, str) and (entry.startswith("ICD10-CM:") or entry.startswith("ICD9-CM:")))]
+    
     print(f"Final updated ICD codes: {output_list}")
-    # (Warnings about unknown systems or numeric ambiguity can be added here as needed.)
     return output_list
-
-def update_icd_coding_old(data, dst=False, dbdschb=False, ipsych=False, eM=False, skip=False, remove_point_in_diag_request=False, ICDCM=False, RegisterRun=False, no_Fill=False, noLeadingICD=False):
-    remove_leading_ICD =  noLeadingICD
-    if (not skip):
-        output_list = []
-        updateICD9 = False
-        updateICD8 = False
-        cantupdateICD8 = False
-        Unknown_system = False
-        global ATC_Requested
-        print_which_section = True
-        if (not type(data) == list):
-            data = data[data.columns[0]].values.tolist()
-        for entry in data:
-            #print(f"In update_icd_coding with: {entry}")
-            skipEntry=False
-            if ICDCM and not dbdschb and not ipsych and not dst:
-                if print_which_section:
-                    print_which_section = False
-                    print("In ICD10CM ICDupdate")
-                if isinstance(entry, str) and entry.startswith('ATC:'):
-                    entry = entry
-                    #ATC_Requested = "All"
-                elif isinstance(entry, str) and entry.startswith('ICD8:'):
-                    if remove_leading_ICD:
-                        entry_str = str(entry).replace('ICD8:', '', 1).upper()
-                    else:
-                        entry_str = str(entry)
-                    integer_part, _, decimal_part = entry_str.partition('.')
-                    integer_part = integer_part.zfill(3)
-                    entry = f"ICD8:{integer_part}.{decimal_part.zfill(2) if eM else decimal_part}"
-                elif isinstance(entry, str) and entry.startswith('ICD9-CM:'):
-                    if remove_leading_ICD:
-                        entry = entry.replace('ICD9-CM:', '', 1).upper()
-                    else:
-                        entry = 'ICD9:' + entry.replace('ICD9-CM:', '', 1).upper()
-                elif isinstance(entry, str) and entry.startswith('ICD10-CM:'):
-                    if remove_leading_ICD:
-                        entry = entry.replace('ICD10-CM:', '', 1).upper()
-                    else:
-                        entry = 'ICD10:' + entry.replace('ICD10-CM:', '', 1).upper()
-                elif isinstance(entry, (int, float)) and str(entry).isdigit():
-                    updateICD8 = True
-                    entry_str = str(entry)
-                    integer_part, _, decimal_part = entry_str.partition('.')
-                    integer_part = integer_part.zfill(3)
-                    if remove_leading_ICD:
-                        entry = f"{integer_part}.{decimal_part.zfill(2) if eM else decimal_part}"
-                    else:
-                        entry = f"ICD8:{integer_part}.{decimal_part.zfill(2) if eM else decimal_part}"
-            # Check if 'ICD9:' or 'ICD10:D' is already added
-            elif dbdschb: #https://medinfo.dk/sks/brows.php check this for information about the Danish codes
-                if print_which_section:
-                    print("In DBDS ICDupdate")
-                    print_which_section = False
-                if isinstance(entry, str) and entry.startswith('ATC:'):
-                    entry = entry.replace('ATC:', '', 1).upper()
-                elif isinstance(entry, str) and entry.startswith('ICD9-CM:'):
-                    skipEntry=True
-                elif isinstance(entry, str) and entry.startswith('ICD10-CM:'):
-                    skipEntry=True
-                elif isinstance(entry, str) and entry.startswith('ICD8:'):
-                    entry_str = str(entry).upper()#.replace('ICD8:', '', 1).upper()
-                    integer_part, _, decimal_part = entry_str.partition('.')
-                    integer_part = integer_part.zfill(3)
-                    entry = f"{integer_part}.{decimal_part.zfill(2) if eM else decimal_part}"
-                elif isinstance(entry, str) and entry.startswith('ICD9:'):
-                    skipEntry=True
-                elif isinstance(entry, str) and not str(entry).isdigit() and not entry.startswith('ICD10:') and not entry.startswith('ICD10:D'):
-                    # Check if the string starts with exactly two letters followed by numbers
-                    if re.match(r'^[A-Z]{2}\d', entry, re.IGNORECASE):
-                        entry = 'ICD10:' + entry.upper()  # String already starts with two letters
-                    elif re.match(r'^[A-Z]\d', entry, re.IGNORECASE):
-                        entry = 'ICD10:D' + entry.upper()  # Add 'D' in front if it starts with one letter
-                    else:
-                        print(f"{entry} has more than two letters in before a numeric value. We don't know how to handle this and will leave it as is.") # No modification for other cases
-                elif isinstance(entry, str) and entry.startswith('ICD10:') and not entry.startswith('ICD10:D'):
-                    entry = 'ICD10:D' + entry.replace('ICD10:', '', 1).upper()
-                elif isinstance(entry, str) and entry.startswith('ICD10:D'):
-                    entry = 'ICD10:' + entry.replace('ICD10:', '', 1).upper()
-                elif isinstance(entry, (int, float)) and str(entry).isdigit():
-                    updateICD8 = True
-                    entry_str = str(entry)
-                    integer_part, _, decimal_part = entry_str.partition('.')
-                    integer_part = integer_part.zfill(3)
-                    entry = f"ICD8:{integer_part}.{decimal_part.zfill(2) if eM else decimal_part}"
-                entry = str(entry).replace('.', '')  # remove '.' from the entry
-            elif RegisterRun:
-                if print_which_section:
-                    print_which_section = False
-                    print("You did select --RegisterRun in your flags. Thus, we will only focus on ICD10 and ICD8 input data. ICD10 will be reformmated to DYXXxx and ICD8 will be just the numeric value. points within the data will be replaced and the length of the code will be adjusted to 5.")
-                if isinstance(entry, str) and entry.startswith('ATC:'):
-                    entry = entry
-                elif isinstance(entry, str) and entry.startswith('ICD9-CM:'):
-                    skipEntry=True
-                elif isinstance(entry, str) and entry.startswith('ICD10-CM:'):
-                    skipEntry=True
-                elif isinstance(entry, str) and entry.startswith('ICD8:'):
-                    entry = entry.replace('ICD8:', '', 1)
-                    updateICD8 = True
-                    entry_str = str(entry)
-                    integer_part, _, decimal_part = entry_str.partition('.')
-                    integer_part = integer_part.zfill(3)
-                    entry = f"{integer_part}.{decimal_part.zfill(2) if eM else decimal_part}"
-                elif isinstance(entry, str) and entry.startswith('ICD9:') and not entry.startswith('ICD9-CM:'):
-                    skipEntry=True
-                elif isinstance(entry, str) and not str(entry).isdigit() and not entry.startswith('ICD10:') and not entry.startswith('ICD10:D'):
-                    # Check if the string starts with exactly two letters followed by numbers
-                    if re.match(r'^[A-Z]{2}\d', entry, re.IGNORECASE):
-                        entry = entry.upper()  # String already starts with two letters
-                    elif re.match(r'^[A-Z]\d', entry, re.IGNORECASE):
-                        entry = 'D' + entry.upper()  # Add 'D' in front if it starts with one letter
-                    else:
-                        print(f"{entry} has more than two letters in before a numeric value. We don't know how to handle this and will leave it as is.") # No modification for other cases
-                elif isinstance(entry, str) and entry.startswith('ICD10:') and not entry.startswith('ICD10:D') and not entry.startswith('ICD10-CM:'):
-                    entry = 'D' + entry.replace('ICD10:', '', 1).upper()
-                elif isinstance(entry, str) and not entry.startswith('ICD10:') and entry.startswith('ICD10:D') and not entry.startswith('ICD10-CM:'):
-                    entry = entry.replace('ICD10:', '', 1).upper()
-                elif isinstance(entry, (int, float)) and str(entry).isdigit() and not entry.startswith('ICD10-CM:') and not entry.startswith('ICD9-CM:'):
-                    entry_str = str(entry)
-                    integer_part, _, decimal_part = entry_str.partition('.')
-                    integer_part = integer_part.zfill(3)
-                    entry = f"{integer_part}.{decimal_part.zfill(2) if eM else decimal_part}"
-                    entry = str(entry).replace('.', '')  # remove '.' from the entry
-            elif ipsych or dst:
-                if print_which_section:
-                    print_which_section = False
-                    print(f"In ipsych or dst ICDupdate: {entry}")
-                if isinstance(entry, str) and entry.startswith('ATC:'):
-                    entry = entry
-                elif isinstance(entry, str) and entry.startswith('ICD9-CM:'):
-                    skipEntry=True
-                elif isinstance(entry, str) and entry.startswith('ICD10-CM:'):
-                    skipEntry=True
-                elif isinstance(entry, str) and entry.startswith('ICD8:'):
-                    entry = entry.replace('ICD8:', '', 1)
-                    entry_str = str(entry)
-                    integer_part, _, decimal_part = entry_str.partition('.')
-                    integer_part = integer_part.zfill(3)
-                    entry = f"{integer_part}.{decimal_part.zfill(2) if eM else decimal_part}"
-                elif isinstance(entry, str) and entry.startswith('ICD9:') and not entry.startswith('ICD9-CM:'):
-                    skipEntry=True
-                elif isinstance(entry, str) and not entry.startswith('ICD10:') and not entry.startswith('ICD10:D') and not str(entry).isdigit():
-                    # Check if the string starts with exactly two letters followed by numbers
-                    if re.match(r'^[A-Z]{2}\d', entry, re.IGNORECASE):
-                        entry = entry.upper()  # String already starts with two letters
-                    elif re.match(r'^[A-Z]\d', entry, re.IGNORECASE):
-                        entry = 'D' + entry.upper()  # Add 'D' in front if it starts with one letter
-                    else:
-                        print(f"{entry} has more than two letters in before a numeric value. We don't know how to handle this and will leave it as is.") # No modification for other cases
-                    entry = split_and_format(entry, fill=eM)
-                elif isinstance(entry, str) and not str(entry).isdigit() and entry.startswith('ICD10:') and not str(entry).isdigit():
-                    # Check if the string starts with exactly two letters followed by numbers
-                    if re.match(r'^ICD10:D[A-Z]\d+', entry, re.IGNORECASE):
-                        entry = entry.replace('ICD10:D', '', 1).upper()  # Case 1: Starts with ICD10:D
-                    elif re.match(r'^ICD10:[A-Z]\d+', entry, re.IGNORECASE):
-                        entry = 'D' + entry.replace('ICD10:', '', 1).upper()  # Case 2: Starts with ICD10:
-                    else:
-                        print(f"{entry} has more than two letters in before a numeric value. We don't know how to handle this and will leave it as is.") # No modification for other cases
-                    entry = split_and_format(entry, fill=eM)
-                elif isinstance(entry, (int, float)) and str(entry).isdigit() and not entry.startswith('ICD10-CM:') and not entry.startswith('ICD9-CM:'):
-                    updateICD8 = True
-                    entry_str = str(entry)
-                    integer_part, _, decimal_part = entry_str.partition('.')
-                    integer_part = integer_part.zfill(3)
-                    entry = f"{integer_part}.{decimal_part.zfill(2) if eM else decimal_part}"
-                entry = str(entry).replace('.', '')  # remove '.' from the entry
-            else:
-                if print_which_section:
-                    print_which_section = False
-                    print("In ELSE ICDupdate")
-                if isinstance(entry, str) and entry.upper().startswith('ATC:'):
-                    entry = entry
-                elif isinstance(entry, str) and entry.upper().startswith('ICD8'):
-                    if remove_leading_ICD:
-                        entry_str = entry.replace('ICD8:', '', 1)
-                    else:
-                        entry_str = entry
-                elif isinstance(entry, str) and entry.upper().startswith('ICD9'):
-                    if remove_leading_ICD:
-                        entry_str = entry.replace('ICD9:', '', 1)
-                    else:
-                        entry = entry
-                elif isinstance(entry, str) and entry.upper().startswith('ICD10') :
-                    if remove_leading_ICD:
-                        entry_str = entry.replace('ICD10:', '', 1)
-                    else:
-                        entry = entry
-                elif isinstance(entry, str) and entry.upper().startswith('ICD9-CM'):
-                    if remove_leading_ICD:
-                        entry_str = entry.replace('ICD9-CM:', '', 1)
-                    else:
-                        entry = entry
-                elif isinstance(entry, str) and entry.upper().startswith('ICD10-CM') :
-                    if remove_leading_ICD:
-                        entry_str = entry.replace('ICD10-CM:', '', 1)
-                    else:
-                        entry = entry
-                elif isinstance(entry, str) and entry.upper().startswith('ICD9CM'):
-                    if remove_leading_ICD:
-                        entry_str = entry.replace('ICD9CM:', '', 1)
-                    else:
-                        entry = entry
-                elif isinstance(entry, str) and entry.upper().startswith('ICD10CM') :
-                    if remove_leading_ICD:
-                        entry_str = entry.replace('ICD10CM:', '', 1)
-                    else:
-                        entry = entry
-                elif isinstance(entry, str):
-                    entry = entry
-                elif isinstance(entry, (int, float)) and str(entry).isdigit():
-                    entry = entry
-                Unknown_system = True
-                if remove_point_in_diag_request or RegisterRun:
-                    entry = str(entry).replace('.', '')  # remove '.' from the entry
-            if noLeadingICD:
-                print("Removing ")
-                prefixes = ['ICD10:', 'ICD10-CM:', 'ICD9:', 'ICD9-CM:', 'ICD8:']
-                for prefix in prefixes:
-                    # Check if entry starts with the prefix
-                    if str(entry).startswith(prefix):
-                        entry = str(entry)[len(prefix):]
-                        break  # Exit loop after the first matching prefix is removedif noLeadingICD:
-                #prefixes = ['ICD10:', 'ICD10-CM:', 'ICD9:', 'ICD9-CM:', 'ICD8:']
-                #for prefix in prefixes:
-                #    entry = str(entry).replace(prefix, '')
-            if (not skipEntry):
-                output_list.append(entry)
-            if(dbdschb or ipsych):
-                #Remove -CM entries
-                output_list = [entry for entry in output_list if not (entry.startswith('ICD10-CM:') or entry.startswith('ICD9-CM:'))]
-        print(f"Final updated ICD codes: {output_list}")
-        if (Unknown_system):
-            print("INFO: As this tool does not know how to process your diagnostic codes, we will keep them as they are.")
-        if (updateICD9):
-            print("Caution! Some (or all) of your diagnostic codes (numeric) did not specify if they are ICD9 or ICD8. Thus we will interpret them for both. This may lead to spurious Case/Control behaviour! It is better to correctly specify your diagnostic codes, e.g. ICD8:290.1, ICD9:290.1, ICD10:DF30")
-        if (updateICD8):
-            if (dbdschb):
-                print("Caution! Some (or all) of your diagnostic codes (numeric) did not specify if they are ICD9 or ICD8. As you are running this script on CHB/DBDS data, we will interpret them as ICD8 and (if needed) correct your input to the correct format [88.0 will become ICD8:08800 (if --eM) or otherwise ICD8:0880]. This may lead to spurious Case/Control behaviour! It is better to correctly specify your diagnostic codes, e.g. ICD8:088.1, ICD8:290.1, ICD9:290.1, ICD10:DF30")
-            else:
-                print("Caution! Some (or all) of your diagnostic codes (numeric) did not specify if they are ICD9 or ICD8.  Thus we will interpret them as ICD8 [88.0 will become ICD8:08800 (if --eM) or otherwise ICD8:0880]. This may lead to spurious Case/Control behaviour! It is better to correctly specify your diagnostic codes, e.g. ICD8:088.1, ICD8:290.1, ICD9:290.1, ICD10:DF30")
-        if (cantupdateICD8):
-            print("Caution! You supplied ICD8 codes. We can't check if they were given in the correct format. Plase make sure to have them written either in ICD8:XXXYY or ICD8:XXX format (X refers to the numbers before the decimal point and Y behind). If you are not supplying two Y, there may be a large proportion of codes been missed as the current codes in the database rely on the 5 digits, thus do NOT use the --eM flag!")
-        return(output_list)
-    else:
-        return(data)
-
 
 # Function to calculate the age at a givent timepoint
 def calculate_age(row, date_column, dob_column):
@@ -2210,7 +1905,7 @@ def load_lpr_file(lpr_file, dta_input, fsep, lpr_cols_to_read_as_date, DateForma
         df_header = pd.read_csv(lpr_file, sep=fsep, dtype=object, nrows=0)
         if lpr_cols_to_read_as_date:
                 lpr_cols_to_read_as_date = list(set([col for col in lpr_cols_to_read_as_date if col in df_header]))
-                print("INFO: We identified the following columns to be present and to be used as date columns: ",lpr_cols_to_read_as_date)  
+                print("INFO: (LPR) We identified the following columns to be present and to be used as date columns: ",lpr_cols_to_read_as_date)  
         if not lpr_cols_to_read_as_date:
                 lpr_cols_to_read_as_date = list(set([col for col in potential_lpr_cols_to_read_as_date if col in df_header]))
                 print("INFO: No cols supplied (lpr) that should be read as dates. Trying to infer them: ",lpr_cols_to_read_as_date)     
@@ -2314,7 +2009,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         df1_N_before = str(df1[iidcol].nunique())
         df1 = df1[df1[iidcol].isin(df3[iidcol])]
         print("After Restraining df1 ",str(df1[iidcol].nunique()),"(",df1_N_before,") and df3 ",str(df3[iidcol].nunique()),"; now(before)")
-    
+    gc.collect()
     if (verbose):
         print(f"In process_pheno_and_exclusions. df1.head(5):{df1.head(5)}; df3.head(5):{df3.head(5)}")
         print(f"In process_pheno_and_exclusions. df1.columns:{df1.columns}; df3.columns:{df3.columns}")
@@ -2372,6 +2067,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     if (len(df1) == 0):
         print("Error: No IIDs left after initial Filtering. Consider using different Filters. Exiting")
         exit()
+    gc.collect()
     if (qced_iids != ""):
         try:
             print("Filtering now for QC'ed Individuals ("+qced_iids+")")
@@ -2422,6 +2118,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         except Exception as e:
             print(f"An error occured while loading or processing the General exclusion file. This step will now be skipped.\nError message: {e}")
             general_exclusions = ""
+    gc.collect()
     if (len(df1) == 0):
         print("Error: No IIDs left after general exclusion Filtering. Consider using different Filters. Exiting")
         exit()
@@ -2437,6 +2134,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         usage()
     # Use boolean indexing to extract rows from the first file that match the values 
     print("## Build initial Phenotype cases")
+    gc.collect()
     if multi_inclusions:
         print("ATC_Requested: ",ATC_Requested)
         tmp_cases_df = pd.DataFrame()
@@ -2537,6 +2235,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
             #tmp_controls_df = merge_IIDs(df1[~df1[iidcol].isin(tmp_cases_df[iidcol])].copy(), diagnostic_col, birthdatecol, input_date_in_name, input_date_out_name, iidcol, verbose, Cases=False, BuildEntryExitDates=BuildEntryExitDates)
     #Housekeeping
     del in_pheno_codes
+    gc.collect()
     if (len(tmp_cases_df) == 0):
         print("Error: No Cases found. Are your input diagnostic codes given in the phenotype file? Exiting")
         print("Info: Phenotype codes to map: ")
@@ -2547,6 +2246,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     
     casecontrol_df = tmp_cases_df.copy()
     del tmp_cases_df
+    gc.collect()
     if (verbose):
         print("Mem after building casecontrol_df and cleaning up tmp_cases_df and tmp_controls_df:")
         usage()
@@ -2593,6 +2293,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         if (verbose):
             print ("Mem after building all ExDEP exclusions and deleteing df1.")
             usage()
+        gc.collect()
     else:
         if lifetime_exclusions_file != "":
             multi_exclusions = False
@@ -2684,6 +2385,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                 exclNumber = exclNumber + 1
             # Clean up
             del(post_exclusions_in, process_line, disorder_dict)
+            gc.collect()
         if oneYearPrior_exclusions_file != "":
             multi_exclusions = False
             with open(oneYearPrior_exclusions_file, 'r') as file:
@@ -2729,6 +2431,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                 exclNumber = exclNumber + 1
             # Clean up
             del(post_exclusions_in, process_line, disorder_dict)
+            gc.collect()
     if (verbose):
         print ("Mem after building Lifetime exclusions and deleteing df1.")
         usage()
@@ -2769,6 +2472,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     if (verbose):
         print("Mem after deleting df3, updating tmp_controls_df, building dx_result_df, casecontrol_df and result_df:")
         usage()
+    gc.collect()
     if (verbose):
         print(result_df.head(5))
         print(birthdatecol + " in result_df: " + str('birthdate' in result_df.columns))
@@ -2864,6 +2568,8 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     if (verbose):
         print("Mem after deleting result_df:")
         usage()
+    else:
+        gc.collect()
     if (iidstatus_col != ""):
         if (iidstatus_col in df4):
             df4.rename(columns={iidstatus_col: "C_STATUS"}, inplace=True)
@@ -3224,7 +2930,19 @@ def batch_load_lprfile(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnummer
     """
     if verbose:
         print(f"Loading LPR files in batch loop {batch_num + 1}")
-
+    df1_rows_to_keep = load_mapping_rows(lprfile, iidcol, iid_batch, fsep)
+    temp_file = str(uuid.uuid4())[:4]+".filtered_temp.csv"
+    build_temp_file(lprfile, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
+    lprfile = temp_file
+    #Get the recnums from lprfile to exctract these from the lpr2nd_file
+    lpr_recnummer_batch = pd.read_csv(lprfile, sep = fsep, usecols = [lpr_recnummer])[lpr_recnummer].unique()
+    print(lpr_recnummer_batch)
+    if lpr2nd_file != "":
+        df1_rows_to_keep = load_mapping_rows(lpr2nd_file, lpr2nd_recnummer, lpr_recnummer_batch, fsep)
+        temp_file = str(uuid.uuid4())[:4]+".filtered_temp.csv"
+        build_temp_file(lpr2nd_file, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
+        lpr2nd_file = temp_file
+    
     # Delegate all file loading and merging to process_lpr_data.
     df_new = process_lpr_data(
         lpr_file=lprfile,
@@ -3239,6 +2957,10 @@ def batch_load_lprfile(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnummer
         lpr_recnummer=lpr_recnummer,
         lpr2nd_recnummer=lpr2nd_recnummer
     )
+
+    if not verbose:
+        os.remove(lprfile)
+        os.remove(lpr2nd_file)
 
     # Append the newly loaded data to the existing DataFrame.
     df = pd.concat([df, df_new], ignore_index=True, sort=False)
@@ -3430,7 +3152,7 @@ def BuildEntryExitDate(df1, df3, iidcol, input_date_in_name, input_date_out_name
     - verbose: If True, prints debug information.
     
     Returns:
-    - Merged DataFrame with new 'Entry_Date' and 'Exit_Date' columns.
+    - Merged DataFrame with new 'EntryDate' and 'ExitDate' columns.
     """
     
     if verbose:
@@ -3464,12 +3186,12 @@ def BuildEntryExitDate(df1, df3, iidcol, input_date_in_name, input_date_out_name
 
     # Group by individual id and calculate entry and exit dates
     grouped = tmp_entry_exit_df.groupby(iidcol, group_keys=False)
-    in_dates = grouped[input_date_in_name].min().reset_index(name='Entry_Date')
+    in_dates = grouped[input_date_in_name].min().reset_index(name='EntryDate')
     
     if input_date_out_name != input_date_in_name:
-        out_dates = grouped[input_date_out_name].max().reset_index(name='Exit_Date')
+        out_dates = grouped[input_date_out_name].max().reset_index(name='ExitDate')
     else:
-        out_dates = grouped[input_date_in_name].max().reset_index(name='Exit_Date')
+        out_dates = grouped[input_date_in_name].max().reset_index(name='ExitDate')
 
     if verbose:
         print("Entry dates:\n", in_dates.head())
@@ -3489,9 +3211,33 @@ def BuildEntryExitDate(df1, df3, iidcol, input_date_in_name, input_date_out_name
     
     return df3_new
 
+def load_config(filename="get_pheno.ini"):
+    config = configparser.ConfigParser()
+    # First try the current working directory
+    #config_path = os.path.join(os.getcwd(), filename)
+    config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), filename)
+    print("INFO: Trying to load load ini file from ",config_path)
+    if not os.path.isfile(config_path):
+        # If not found, try the directory where the script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(script_dir, filename)
+        print("INFO: Trying to load load ini file from ",config_path)
+        if not os.path.isfile(config_path):
+            # No configuration file found; you can either return an empty config or handle defaults
+            return None
+
+    config.read(config_path)
+    return config
+
 
 #need to handle double counts and exclusions
-def main(lpr_file, pheno_request, stam_file, addition_information_file, use_predefined_exdep_exclusions, general_exclusions, diagnostic_col, pheno_requestcol, iidcol, birthdatecol, sexcol, fsep, gsep, outfile, exact_match, input_date_in_name, input_date_out_name, qced_iids, ctype_excl, ctype_incl, lifetime_exclusions_file, post_exclusions_file, oneYearPrior_exclusions_file, exclCHBcontrols, Filter_YoB, Filter_Gender, verbose, Build_Test_Set, test_run, MatchFI, skip_icd_update, DateFormat_in, iidstatus_col, remove_point_in_diag_request, num_threads, main_pheno_name, BuildEntryExitDates, build_ophold, write_pickle, write_fastGWA_format, write_Plink2_format, lpr_cols_to_read_as_date, stam_cols_to_read_as_date, MinMaxAge, ICDCM, load_precreated_phenotypes, RegisterRun, lowMem, batchsize, noLeadingICD, lpr_file2, recnum, recnum2, f2col, atc_file, atc_diag_col, runLPRonly, runPSYKonly, argstring):
+def main(lpr_file, pheno_request, stam_file, addition_information_file, use_predefined_exdep_exclusions, general_exclusions, diagnostic_col, 
+         pheno_requestcol, iidcol, birthdatecol, sexcol, fsep, gsep, outfile, exact_match, input_date_in_name, input_date_out_name, qced_iids, 
+         ctype_excl, ctype_incl, lifetime_exclusions_file, post_exclusions_file, oneYearPrior_exclusions_file, exclCHBcontrols, Filter_YoB, 
+         Filter_Gender, verbose, Build_Test_Set, test_run, MatchFI, skip_icd_update, DateFormat_in, iidstatus_col, remove_point_in_diag_request, 
+         num_threads, main_pheno_name, BuildEntryExitDates, build_ophold, write_pickle, write_fastGWA_format, write_Plink2_format, lpr_cols_to_read_as_date, 
+         stam_cols_to_read_as_date, MinMaxAge, ICDCM, load_precreated_phenotypes, RegisterRun, lowMem, batchsize, noLeadingICD, lpr_file2, recnum, recnum2, 
+         f2col, atc_file, atc_diag_col, atc_date, atc_datecols, runLPRonly, runPSYKonly, opholdsep, ophold_file, inifile, argstring, defaultargs):
     global DateFormat
     global ATC_Requested
     global id_diagnostics
@@ -3534,6 +3280,9 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
     min_Age = int(MinMaxAge.split(',')[0])
     max_Age = int(MinMaxAge.split(',')[1])
     dta_input=False
+    runPSYKonly = False
+    runLPRonly = False
+    processed_ophold_file = "" 
 
     potential_lpr_cols_to_read_as_date = []
     atc_date_col = ""
@@ -3549,12 +3298,19 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         print("ERROR: Current Python is at version",('{0[0]}.{0[1]}.{0[2]}'.format(sys.version_info)),"but should be >=",python_min_version)
         sys.exit()
     
+    if main_pheno_name != "":
+        print("INFO: --main_pheno_name is deprecated!")
+    #TODO: Add instead of hardcoded.
+    if atc_date != "":
+        print("INFO: --atc_date is not yet in use!")
+    #TODO: Add instead of hardcoded.
+    if atc_datecols != "":
+        print("INFO: --atc_datecols is not yet in use!")
+
     #TODO: Use MinMaxAge to set the variables for the exclusion criteria.
     
     #Set Global variable based on input
     DateFormat = DateFormat_in
-    if DateFormat.startswith("%d"):
-        DayFirst=True
     if (Build_Test_Set):
         print("Generating a test dataset and store it in the directory selected with -o.",outfile)
         generate_test_dataset(outfile)
@@ -3569,6 +3325,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
     if ("cld065" in hostname or "dprhdbds" in hostname ):
         dbds_run = True
         cluster_run = "CHB_DBDS"
+        print("INFO: If not done, consider to use --DiagTypeExclusions \"H,M\", as this will exclude H (referral) and M (temporary) diagnoses.")
     else:
         dbds_run = False
 
@@ -3590,139 +3347,116 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
     if ("dpibp" in hostname):
         cluster_run = "IBP_computerome"
     dst=False
-    if (cluster_run == "NCRR_DST"):
-        dta_input=True
-        lpr_cols_to_read_as_date = ['fdato','d_inddto','d_uddto']
-        dst=True
-        opholdsep="\t"
-        if (lpr_file == ''):
-            stam_file = "E://Data/rawdata/703935/Population/stam2016h.dta"
-            stam_cols_to_read_as_date = ['fdato']#,'statd','fdato_m','fdato_f','statd_m','statd_f']
-            lpr_file = "E://Data/rawdata/703935/Ipsych2016/Dst/psyk_adm2018.dta,E://Data/rawdata/703935/Ipsych2016/Dst/lpradm1977_2018.dta" 
-            lpr2nd_file = "E://Data/rawdata/703935/Ipsych2016/Dst/psyk_diag2018.dta,E://Data/rawdata/703935/Ipsych2016/Dst/lprdiag1977_2018.dta" 
-            if runLPRonly:
-                lpr_file = "E://Data/rawdata/703935/Ipsych2016/Dst/lpradm1977_2018.dta" 
-                lpr2nd_file = "E://Data/rawdata/703935/Ipsych2016/Dst/lprdiag1977_2018.dta" 
-            if runPSYKonly:
-                lpr_file = "E://Data/rawdata/703935/Ipsych2016/Dst/psyk_adm2018.dta" 
-                lpr2nd_file = "E://Data/rawdata/703935/Ipsych2016/Dst/psyk_diag2018.dta" 
-            #lpr_file = "E://Data/rawdata/703935/Population/psyk_adm2016.dta,E://Data/rawdata/703935/Population/lpr_adm2016b.dta" #"E://Data/rawdata/703935/HEALTH/psyk_adm2016.dta,E://Data/rawdata/703935/HEALTH/lpr_adm2016b.dta"
-            addition_information_file = "E://Data/rawdata/703935/Population/ipsych2015design_v2.dta"  #"E://Data/rawdata/703935/Population/stamdata2016.dta"
-            diagnostic_col="c_adiag"
-            pheno_requestcol = "diagnosis"
-            birthdatecol = "fdato"
-            iidcol="pnr"
-            fsep=","
-            gsep=","
-            input_date_in_name='d_inddto'
-            input_date_out_name='d_uddto'
-            general_exclusions = ""
-            lpr_recnummer = 'recnum'
-            lpr2nd_recnummer = lpr_recnummer
-            diagnostic2nd_col = "c_diag"
 
-    if (ipsych_run or cluster_run == "iPSYCH"):
-        lpr_cols_to_read_as_date = ['fdato','d_inddto','d_uddto']
-        opholdsep="\t"
-        if (lpr_file == ''):
-            DateFormat = "%d/%m/%Y"
-            DayFirst=True
-            #stam_file = "/home/imlundberg/scripts/first1000.stamdata2016.csv"
-            stam_file = "/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/stamdata2016.csv"
-            stam_cols_to_read_as_date = ['fdato','statd','fdato_m','fdato_f','statd_m','statd_f']
-            lpr_file = "/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/psyk_adm2016.csv,/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/lpr_adm2016.csv"
-            if runLPRonly:
-                lpr_file = "/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/lpr_adm2016.csv"
-            if runPSYKonly:
-                lpr_file = "/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/psyk_adm2016.csv"
-            addition_information_file = "" #"/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/civil2016.csv"
-            diagnostic_col="c_adiag"
-            pheno_requestcol = "diagnosis"
-            birthdatecol = "fdato"
-            iidcol="pnr"
-            fsep=","
-            gsep=","
-            input_date_in_name='d_inddto'
-            input_date_out_name='d_uddto'
-            general_exclusions = ""
+    if (cluster_run in ("NCRR_DST", "IBP_computerome", "iPSYCH", "CHB_DBDS") and inifile == ""):
+        inifile = "get_pheno.ini"
+
+    # Load the configuration
+    config = load_config(filename=inifile)
+    if config is None:
+        print("No configuration file found. Using built-in defaults and your settings.")
+        # Set your defaults here or handle as needed.
+    else:
+        # For example, to load the NCRR_DST configuration:
+        if config.has_section(cluster_run):
+            # For list values, split by comma and strip any whitespace.
+            if("--fDates" in defaultargs and config.has_option(cluster_run, "lpr_cols_to_read_as_date")):
+                lpr_cols_to_read_as_date = [col.strip() for col in config.get(cluster_run, "lpr_cols_to_read_as_date").split(",")] #ToDo: Check if this is ok. I think this shouldn't yet be splitted as this will be done at later stage. check for all of these below.
+            if("-i" in defaultargs and config.has_option(cluster_run, "stam_file")):
+                stam_file = config.get(cluster_run, "stam_file")
+            if("--iDates" in defaultargs and config.has_option(cluster_run, "stam_cols_to_read_as_date")):
+                stam_cols_to_read_as_date = [col.strip() for col in config.get(cluster_run, "stam_cols_to_read_as_date").split(",")]
+            if("-f" in defaultargs and config.has_option(cluster_run, "lpr_file")):
+                lpr_file = config.get(cluster_run, "lpr_file")
+            if("--f2" in defaultargs and config.has_option(cluster_run, "lpr2nd_file")):
+                lpr2nd_file = config.get(cluster_run, "lpr2nd_file")
+            if("-j" in defaultargs and config.has_option(cluster_run, "addition_information_file")):
+                addition_information_file = config.get(cluster_run, "addition_information_file")
+            if("--fcol" in defaultargs and config.has_option(cluster_run, "diagnostic_col")):
+                diagnostic_col = config.get(cluster_run, "diagnostic_col")
+            if("--gcol" in defaultargs and config.has_option(cluster_run, "pheno_requestcol")):
+                pheno_requestcol = config.get(cluster_run, "pheno_requestcol")
+            if("--bdcol" in defaultargs and config.has_option(cluster_run, "birthdatecol")):
+                birthdatecol = config.get(cluster_run, "birthdatecol")
+            if("--iidcol" in defaultargs and config.has_option(cluster_run, "iidcol")):
+                iidcol = config.get(cluster_run, "iidcol")
+            if("--fsep" in defaultargs and config.has_option(cluster_run, "fsep")):
+                fsep = config.get(cluster_run, "fsep")
+            if("--gsep" in defaultargs and config.has_option(cluster_run, "gsep")):
+                gsep = config.get(cluster_run, "gsep")
+            if("--din" in defaultargs and config.has_option(cluster_run, "input_date_in_name")):
+                input_date_in_name = config.get(cluster_run, "input_date_in_name")
+            if("--don" in defaultargs and config.has_option(cluster_run, "input_date_out_name")):
+                input_date_out_name = config.get(cluster_run, "input_date_out_name")
+            if("--ge" in defaultargs and config.has_option(cluster_run, "general_exclusions")):
+                general_exclusions = config.get(cluster_run, "general_exclusions")
+            if("--recnum" in defaultargs and config.has_option(cluster_run, "lpr_recnummer")):
+                lpr_recnummer = config.get(cluster_run, "lpr_recnummer")
+            if("--recnum2" in defaultargs and config.has_option(cluster_run, "lpr2nd_recnummer")):
+                lpr2nd_recnummer = config.get(cluster_run, "lpr2nd_recnummer")
+            if("--f2col" in defaultargs and config.has_option(cluster_run, "diagnostic2nd_col")):
+                diagnostic2nd_col = config.get(cluster_run, "diagnostic2nd_col")
+            if("--" in defaultargs and config.has_option(cluster_run, "ophold_file")):
+                ophold_file = config.get(cluster_run, "ophold_file")
+            if("--ophsep" in defaultargs and config.has_option(cluster_run, "opholdsep")):
+                opholdsep = config.get(cluster_run, "opholdsep")
+            if(config.has_option(cluster_run, "processed_ophold_file")):
+                processed_ophold_file = config.get(cluster_run, "processed_ophold_file")
+            if config.has_option(cluster_run, "runLPRonly"):    
+                runLPRonly = config.get(cluster_run, "runLPRonly")
+            if config.has_option(cluster_run, "runPSYKonly"):       
+                runPSYKonly = config.get(cluster_run, "runPSYKonly")
+            if("--DateFormat" in defaultargs and config.has_option(cluster_run, "DateFormat")):
+                DateFormat = config.get(cluster_run, "DateFormat")
+            if("--removePointInDiagCode" in defaultargs and config.has_option(cluster_run, "remove_point_in_diag_request")):
+                remove_point_in_diag_request = config.get(cluster_run, "remove_point_in_diag_request")
+            if("--noLeadingICD" in defaultargs and config.has_option(cluster_run, "remove_ICD_naming")):
+                noLeadingICD = config.get(cluster_run, "remove_ICD_naming")
+            if("--noLeadingICD" in defaultargs and config.has_option(cluster_run, "noLeadingICD")):
+                noLeadingICD = config.get(cluster_run, "noLeadingICD")
+            if("--sexcol" in defaultargs and config.has_option(cluster_run, "sexcol")):
+                sexcol = config.get(cluster_run, "sexcol")
+            if("--atc" in defaultargs and config.has_option(cluster_run, "atc_file")):
+                atc_file = config.get(cluster_run, "atc_file")
+            if("--atccol" in defaultargs and config.has_option(cluster_run, "atc_diag_col")):
+                atc_diag_col = config.get(cluster_run, "atc_diag_col")
+            if("--atcdatecol" in defaultargs and config.has_option(cluster_run, "atc_date_col")):
+                atc_date_col = config.get(cluster_run, "atc_date_col")
+            if("--atcDates" in defaultargs and config.has_option(cluster_run, "atc_cols_to_read_as_date")):
+                atc_cols_to_read_as_date = config.get(cluster_run, "atc_cols_to_read_as_date")
+            if("--DiagTypeExclusions" in defaultargs and config.has_option(cluster_run, "DiagTypeExclusions")):
+                ctype_excl = config.get(cluster_run, "DiagTypeExclusions")
+            if("--lowmem" in defaultargs and config.has_option(cluster_run, "lowmem")):
+                lowMem = config.get(cluster_run, "lowmem")
+            if("--batchsize" in defaultargs and config.has_option(cluster_run, "batchsize")):
+                batchsize = config.get(cluster_run, "batchsize")
+            # Continue similarly for other sections or add logic to choose the right one.
     
-    if (cluster_run == "IBP_computerome" and stam_file == "/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/stamdata2016.csv"):
-        stam_file = "/dpibp/data/raw/2021-03-18_register_clean/stamdata2016.csv"
-        lpr_file = "/dpibp/data/raw/2021-03-18_register_clean/psyk_adm2016.csv,/dpibp/data/raw/2021-03-18_register_clean/lpr_adm2016.csv"
-        lpr2nd_file = "/dpibp/data/raw/2021-03-18_register_clean/psyk_diag2016.csv,/dpibp/data/raw/2021-03-18_register_clean/lpr_diag2016.csv" 
-        if runLPRonly:
-            lpr_file = "/dpibp/data/raw/2021-03-18_register_clean/lpr_adm2016.csv"
-            lpr2nd_file = "/dpibp/data/raw/2021-03-18_register_clean/lpr_diag2016.csv" 
-        if runPSYKonly:
-            lpr_file = "/dpibp/data/raw/2021-03-18_register_clean/psyk_adm2016.csv"
-            lpr2nd_file = "/dpibp/data/raw/2021-03-18_register_clean/psyk_diag2016.csv" 
-        lpr_recnummer = 'k_recnum'
-        lpr2nd_recnummer = 'v_recnum'
-        diagnostic2nd_col = 'c_diag'
-        stam_cols_to_read_as_date = ['fdato','statd','fdato_m','fdato_f','statd_m','statd_f']
-        lpr_cols_to_read_as_date = ['fdato','d_inddto','d_uddto']
-        sexcol="kqn"
-        addition_information_file = ""
-        diagnostic_col="c_adiag"
-        pheno_requestcol = "diagnosis"
-        birthdatecol = "fdato"
-        iidcol="pnr"
-        fsep=","
-        gsep=","
-        opholdsep="\t"
-        input_date_in_name='d_inddto'
-        input_date_out_name='d_uddto'
-        general_exclusions = ""
-        DateFormat = "%d/%m/%Y"
+    if DateFormat.startswith("%d"):
         DayFirst=True
-        remove_point_in_diag_request = True
-        remove_ICD_naming = True
 
-    if (dbds_run or cluster_run == "CHB_DBDS"):
-        DateFormat = "%Y-%m-%d"
-        DayFirst=False
-        iidcol = "cpr_enc"
-        fsep = "\t"
-        gsep = "\t"
-        #qced_iids = "/data/preprocessed/genetics/chb_degen_freeze_20210503/DEGEN_GSA_FINAL.fam"
-        #qced_iids = "/data/preprocessed/genetics/chb_degen_freeze_20230707/01.Genotypes/GSA_degenx_qc.fam"
-        qced_iids = "/data/preprocessed/genetics/chb_degen_freeze_20240614/01.Genotypes/GSA_degen_qc.fam"
-        #general_exclusions = "/data/preprocessed/genetics/chb_degen_freeze_20210503/degen_exclusion_latest"
-        #general_exclusions = "/data/preprocessed/genetics/chb_degen_freeze_20230707/degen_exclusion_latest"
-        general_exclusions = "/data/preprocessed/genetics/chb_degen_freeze_20240614/degen_exclusion_latest"
-        lpr_cols_to_read_as_date = ['date_in','date_out']
-        if (lpr_file == ''):
-            diagnostic_col = "diagnosis"
-            pheno_requestcol = "diagnosis"
-            input_date_in_name = "date_in"
-            input_date_out_name = "date_out"
-            #lpr_file = "/data/projects_chb/werge_degen/20221220/degen_registry_lpr_lpr3_diagnoses.tsv" #cpr_enc; source;date_in;date_out;type;diagnosis
-            #lpr_file = "/data/projects_chb/werge_degen/20240327/degen_registry_lpr_lpr3_diagnoses.tsv" #cpr_enc; source;date_in;date_out;type;diagnosis
-            lpr_file = "/data/projects_chb/werge_degen/20250102/degen_registry_lpr_lpr3_diagnoses.tsv" #cpr_enc; source;date_in;date_out;type;diagnosis
-            atc_file = "/data/projects_chb/werge_degen/20250102/degen_prescriptions.tsv"
-            atc_diag_col = "atc"
-            atc_date_col = "eksd"
-            atc_cols_to_read_as_date = ['eksd']
-            if (test_run):
-                lpr_file = "/data/projects_chb/werge_degen/aSchorkLab/data/ExDEP/get_phenotypes_exdep_test_data.tsv"
-                pheno_request = "./sample_pheno_request.txt"
-        if ("degen_prescriptions.tsv" in lpr_file or "lmdb.tsv" in lpr_file ):
-            lpr_cols_to_read_as_date = ['eksd']
-            diagnostic_col = "atc"
-            pheno_requestcol = "atc"
-            input_date_in_name = "eksd"
-            input_date_out_name = "eksd"
-            atc_cols_to_read_as_date = ['eksd']
-            skip_icd_update = True
-        stam_cols_to_read_as_date = ['birthdate']
-        if (stam_file == ''):
-            #stam_file = "/data/projects_chb/werge_degen/20221220/cohort.tsv"
-            #stam_file = "/data/projects_chb/werge_degen/20240327/cohort.tsv"
-            stam_file = "/data/projects_chb/werge_degen/20250102/cohort.tsv"
-            stam_cols_to_read_as_date = ['birthdate']
-            addition_information_file = "/data/projects_chb/werge_degen/20250102/t_person.tsv"#,/data/projects_chb/werge_degen/20240327/cohort_sample_dates_20240327"
-            
-            
+    dst = False
+    if (cluster_run in ["NCRR_DST","IBP_DST"]):
+        dst = True
+        dta_input = True
+
+    if runLPRonly:
+        file_paths = lpr_file.split(',') if ',' in lpr_file else [lpr_file]
+        if (len(file_paths) == 2):
+            lpr_file = file_paths[1] #Use the second file - by convention, this should be LPR
+        if(lpr2nd_file != ""):
+            file_paths = lpr2nd_file.split(',') if ',' in lpr2nd_file else [lpr2nd_file]
+            if (len(file_paths) == 2):
+                lpr2nd_file = file_paths[1]
+
+    if runPSYKonly:
+        file_paths = lpr_file.split(',') if ',' in lpr_file else [lpr_file]
+        if (len(file_paths) == 2):
+            lpr_file = file_paths[0] #Use the first file - by convention, this should be PSYK
+        if(lpr2nd_file != ""):
+            file_paths = lpr2nd_file.split(',') if ',' in lpr2nd_file else [lpr2nd_file]
+            if (len(file_paths) == 2):
+                lpr2nd_file = file_paths[0]
 
     if (test_run and not dbds_run):
         use_predefined_exdep_exclusions = True
@@ -3992,7 +3726,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                         sys.exit()
                     if stam_cols_to_read_as_date:
                         stam_cols_to_read_as_date = list(set([col for col in stam_cols_to_read_as_date if col in df_header]))
-                        print("INFO: We identified the following columns to be present and to be used as date columns: ",stam_cols_to_read_as_date)  
+                        print("INFO: (STAM) We identified the following columns to be present and to be used as date columns: ",stam_cols_to_read_as_date)  
                         df = pd.read_csv(stamfile, sep=fsep, dtype=object, dayfirst=DayFirst, parse_dates=stam_cols_to_read_as_date)
                     else:
                         try:
@@ -4004,6 +3738,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 del(df)
             del(stamfile)
             del(file_paths)
+            gc.collect()
         else:
             # Load the thrid file as a DataFrame(should be cohort information e.g. with Birthdates and Gender) 
             if dta_input:
@@ -4018,7 +3753,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                     sys.exit()
                 if stam_cols_to_read_as_date:
                     stam_cols_to_read_as_date = list(set([col for col in stam_cols_to_read_as_date if col in df_header]))
-                    print("INFO: We identified the following columns to be present and to be used as date columns: ",stam_cols_to_read_as_date)
+                    print("INFO: (STAM-single) We identified the following columns to be present and to be used as date columns: ",stam_cols_to_read_as_date)
                     df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, dayfirst=DayFirst, parse_dates=stam_cols_to_read_as_date)
                 else:
                     try:
@@ -4066,31 +3801,31 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         if (cluster_run == "iPSYCH" or cluster_run == "IBP_computerome"):
             if (build_ophold):
                 try:
-                    ophold = pd.read_csv("/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/ophold2016.csv", sep=opholdsep, dtype=object)
+                    ophold = pd.read_csv(ophold_file, sep=opholdsep, dtype=object)
                 except TypeError:
-                    ophold = pd.read_csv("/faststorage/jail/project/ibp_data_secure/danish_population/2016-01-01_register_raw/ophold2016.csv", engine='python', sep=opholdsep, dtype=object)
-                df3 = process_ophold(ophold, df3, "", "/dpibp/shared/aSchorkLab/data/processed_ophold.csv", birthdatecol, iidcol, verbose)
+                    ophold = pd.read_csv(ophold_file, engine='python', sep=opholdsep, dtype=object)
+                df3 = process_ophold(ophold, df3, "", processed_ophold_file, birthdatecol, iidcol, verbose)
             else:
-                if (os.path.isfile("/dpibp/shared/aSchorkLab/data/processed_ophold.csv")):
+                if (os.path.isfile(processed_ophold_file)):
                     try:
-                        ophold = pd.read_csv("/dpibp/shared/aSchorkLab/data/processed_ophold.csv", sep=opholdsep, dtype=object)
+                        ophold = pd.read_csv(processed_ophold_file, sep=opholdsep, dtype=object)
                     except TypeError:
-                        ophold = pd.read_csv("/dpibp/shared/aSchorkLab/data/processed_ophold.csv", engine='python', sep=opholdsep, dtype=object)
+                        ophold = pd.read_csv(processed_ophold_file, engine='python', sep=opholdsep, dtype=object)
                     df3 = pd.merge(df3,ophold,how="left", on=iidcol)
                 
         if (cluster_run == "NCRR_DST"):
             if (build_ophold):
-                ophold = pd.read_stata("E://Data/rawdata/703935/Population/ophold2016b.dta", sep=opholdsep, dtype=object)
-                df3 = process_ophold(ophold, df3, "", "E://Data/workdata/703935/MisLun/processed_ophold.csv", birthdatecol, iidcol, verbose)
+                ophold = pd.read_stata(ophold_file, sep=opholdsep, dtype=object)
+                df3 = process_ophold(ophold, df3, "", processed_ophold_file, birthdatecol, iidcol, verbose)
             else:
-                if (os.path.isfile("E://Data/workdata/703935/MisLun/processed_ophold.csv")):
+                if (os.path.isfile(processed_ophold_file)):
                     try:
-                        ophold = pd.read_csv("E://Data/workdata/703935/MisLun/processed_ophold.csv", sep=opholdsep, dtype=object)
+                        ophold = pd.read_csv(processed_ophold_file, sep=opholdsep, dtype=object)
                         df3 = pd.merge(df3,ophold,how="left", on=iidcol)
                     except: 
                         print("ERROR: No OPHOLD data preprocessed. Please use --BuildOphold flag.")
         n_stam_iids = df3[iidcol].nunique()
-
+        gc.collect()
         df4 = pd.DataFrame()
         # Load the fourth file as a DataFrame(should be a file with additional rows of information. This will not be merged but appended to df1) 
         if (addition_information_file != ''):
@@ -4128,6 +3863,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             if(("diagnosis" in df3.columns) and "diagnosis" in df4.columns):# or "diagnosis" in df1.columns) and "diagnosis" in df4.columns):
                 df4.drop("diagnosis",inplace=True, axis=1)
             print("Info: Finished loading -j file(s)")
+            gc.collect()
 
         if (use_predefined_exdep_exclusions):
             min_Age = 18
@@ -4196,7 +3932,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             
             if BuildEntryExitDates:
                 df3 = BuildEntryExitDate(df1, df3, iidcol, input_date_in_name, input_date_out_name, verbose)
-
+            gc.collect()
             print("Pheno request: ",in_pheno_codes)
             print("Original Pheno request: ",orig_pheno_request)
             process_pheno_and_exclusions(MatchFI=MatchFI, df1=df1, df3=df3, df4=df4, iidcol=iidcol, verbose=verbose, ctype_excl=ctype_excl, ctype_incl=ctype_incl, Filter_YoB=Filter_YoB, Filter_Gender=Filter_Gender, use_predefined_exdep_exclusions=use_predefined_exdep_exclusions, RegisterRun=RegisterRun, dst=dst, ipsych_run=ipsych_run, dbds_run=dbds_run, cluster_run=cluster_run, exact_match=exact_match, skip_icd_update=skip_icd_update, remove_point_in_diag_request=remove_point_in_diag_request, ICDCM=ICDCM, qced_iids=qced_iids, general_exclusions=general_exclusions, multi_inclusions=multi_inclusions, in_pheno_codes=in_pheno_codes, pheno_requestcol=pheno_requestcol, diagnostic_col=diagnostic_col, atc_diag_col=atc_diag_col, birthdatecol=birthdatecol, atc_date_col=atc_date_col, atc_cols_to_read_as_date=atc_cols_to_read_as_date, atc_file=atc_file, fsep=fsep, BuildEntryExitDates=BuildEntryExitDates, lifetime_exclusions_file=lifetime_exclusions_file, post_exclusions_file=post_exclusions_file, oneYearPrior_exclusions_file=oneYearPrior_exclusions_file, outfile=outfile, write_Plink2_format=write_Plink2_format, write_fastGWA_format=write_fastGWA_format, write_pickle=write_pickle, n_stam_iids=n_stam_iids, exclCHBcontrols=exclCHBcontrols, iidstatus_col=iidstatus_col, addition_information_file=addition_information_file, sexcol=sexcol, input_date_in_name=input_date_in_name, input_date_out_name=input_date_out_name, append=False)
@@ -4220,6 +3956,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Extracts a Phenotype from input files based on IIDs and diagnostic codes.\nThe best way to start, is to generate a test dataset: \'python get_phenotype.py -g \"\" -o ./ --BuildTestSet\' and then run \'python get_phenotype.py -g \"\" -o testrun.tsv --eM --ExDepExc --testRun\' ')
+    parser.add_argument('--ini', required=False, default = '', help='Load an ini file that contains your data sources. Default: "%(default)s"')
     parser.add_argument('-g', required=True, help='File with all Diagnostic codes to export')
     parser.add_argument('-o', required=True, help='Outfile name; dont forget to add the location, otherwise it will be saved in the local dir.') 
     parser.add_argument('-f', required=False, default='', help='Diagnosis file. Should have at least \"IID\", \"date_in\", \"date_out\", and \"diagnosis\" as columns. Names can be defined using --iidcol, --din, --don, and --fcol. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN protocol)') 
@@ -4236,8 +3973,10 @@ if __name__ == '__main__':
     parser.add_argument('--bdcol', required=False, default="birthdate", help='Columname of Birthdate in files. Defaults to "%(default)s"')
     parser.add_argument('--sexcol', required=False, default="sex", help='Columname of Sex/Gender in files. Defaults to "%(default)s"')
     parser.add_argument('--atccol', required=False, default="", help='Columname of ATC codes in files. Defaults to "%(default)s"')
+    parser.add_argument('--atcdatecol', required=False, default="", help='Columname of ATC prescription date column in the --atc file(s). Defaults to "%(default)s"')
     parser.add_argument('--fsep', required=False, default=",", help='Separator of -f i.e. tab; default "%(default)s" (or "\\t\" in CHB/DBDS)')
     parser.add_argument('--gsep', required=False, default=",", help='Separator of -g i.e. tab; default "%(default)s" (or "\\t\" in CHB/DBDS)')
+    parser.add_argument('--ophsep', required=False, default=",", help='Separator of Ophold file - currently only available on CHB/DBDS,DST i.e. "\\t\"; default "%(default)s" (or "\\t\" in CHB/DBDS)')
     parser.add_argument('--din',required=False, default='d_inddto', help='Columname of first diagnosis date. e.g. \'d_inddto\' or \'date_in\'. Default: "%(default)s" (or \'date_in\' in CHB/DBDS)')
     parser.add_argument('--don',required=False, default='d_uddto', help='Columname of first diagnosis date. e.g. \'d_uddto\' or \'date_out\'. Default: "%(default)s" (or \'date_out\' in CHB/DBDS)')
     parser.add_argument('--recnum',required=False, default='', help='Columname of the recnum field in -f files. Default: "%(default)s" (or \'recnum\' on NCRR)')
@@ -4253,8 +3992,9 @@ if __name__ == '__main__':
     parser.add_argument('--LifetimeExclusion', default='', help='Define Lifetime exclusions (if a case has any of the listed codes, it will be excluded). This should be a file containing either one row with all codes listed (comma separated) or per row a exclusion name, followed by a list of diagnostic codes (similar to the input). e.g. "BPD\tICD10:F30,ICD10:F30.0,ICD10:F30.1,ICD10:F30.2,ICD10:F30.8,ICD10:F30.9,ICD10:F31,ICD10:F31.0,ICD10:F31.1,ICD10:F31.2,ICD10:F31.3,ICD10:F31.4,ICD10:F31.5,ICD10:F31.6,ICD10:F31.7,ICD10:F31.8,ICD10:F31.9"\nIf you are using CHB/DBDS data, please remember, that the ICD10 codes have to start with ICD10:D***, e.g. ICD10:DF33.0. Default: "%(default)s"'),
     parser.add_argument('--PostExclusion', default='', help='Define Post exclusions (if a case has any of the listed codes, all main diagnoses after the first occuring date of the listed codes will be excluded). This should be a file containing either one row with all codes listed (comma separated) or  per row a exclusion name, followed by a list of diagnostic codes (similar to the input). Default: "%(default)s"'),
     parser.add_argument('--OneyPriorExclusion', default='', help='Define One Year Prio exclusions (all entries for a case that happen within one year prior to any date of the listed codes, these entries will be excluded). This should be a file containing either one row with all codes listed (comma separated) or  per row a exclusion name, followed by a list of diagnostic codes (similar to the input). Default: "%(default)s"'),
-    parser.add_argument('--fDates', default=[], help='Which columns inf your -f file are Dates? This automatically uses the columns you supplied under --bdcol, --don and --din. You only need to specify this, if you have additonal Dates that should be reformatted. Specify as comma separated list without spaces. Default: "%(default)s"'),
-    parser.add_argument('--iDates', default=[], help='Which columns inf your -i file are Dates? This automatically uses the columns you supplied under --bdcol, --don and --din. You only need to specify this, if you have additonal Dates that should be reformatted. Specify as comma separated list without spaces. Default: "%(default)s"'),
+    parser.add_argument('--fDates', default=[], help='Which columns in your -f file are Dates? This automatically uses the columns you supplied under --bdcol, --don and --din. You only need to specify this, if you have additonal Dates that should be reformatted. Specify as comma separated list without spaces. Default: "%(default)s"'),
+    parser.add_argument('--iDates', default=[], help='Which columns in your -i file are Dates? This automatically uses the columns you supplied under --bdcol, --don and --din. You only need to specify this, if you have additonal Dates that should be reformatted. Specify as comma separated list without spaces. Default: "%(default)s"'),
+    parser.add_argument('--atcDates', default=[], help='Which columns in your --atc file are Dates? This automatically uses the columns you supplied under --bdcol, --don and --din. You only need to specify this, if you have additonal Dates that should be reformatted. Specify as comma separated list without spaces. Default: "%(default)s"'),
     parser.add_argument('--DateFormat',required=False, default="%d/%m/%Y", help='Format of Dates in your data. Default "%(default)s" --> 31/01/1980')
     parser.add_argument('--MinMaxAge', default='0,0', help='Filter by Min and Max Age at first diagnosis. This should be given as comma separated numerics in the form of x,y; i.e. 18,50 or 17.99,50.01, 0,0 (no exclusion) and is interpreted as inclusion as case if first diagnosis age >x and <y. Default: "%(default)s"'),
     parser.add_argument('--Fyob', default='', help='Filter by Year of Birth. Everyone before this date will be excluded. Date needs to be given in the following format: \"YYYY-MM-DD\". Default: "%(default)s"'),
@@ -4264,6 +4004,7 @@ if __name__ == '__main__':
     parser.add_argument('--skipICDUpdate', action='store_true', help='If your supplied diagnostic codes are already in line with your datastructure, you can use this toggle to skip the updating (highly recommended if your input is in a correct format!)')
     parser.add_argument('--MatchFI', action='store_true', help='If you want to keep only the IIDs overlapping between -g and -f use this flag.')
     parser.add_argument('--BuildEntryExitDates',action='store_true', help='If you want to extract additional information about the controls. This basically adds first and last date of observation (any diagnostic code) and writes it to first in date, last out date, in_dates, and out_dates. NB: This can be used if you don\'t have an Entry and Exit date known. Be aware, this will increase time needed for calculation.')
+    parser.add_argument('--Ophold', default="", help='If you want to load and process the ophold file (on IBP Cluster only). Default "%(default)s"')
     parser.add_argument('--BuildOphold', action='store_true', help='If you want to update the ophold file used (on IBP Cluster only).')
     parser.add_argument('--RegisterRun', action='store_true', help='We will try to determine this automatically based on known Servers. If you are using this method on an unknown Server and your diagnostic codes are in the follwing format DYXXxx; where Y stands for the letter of the group and XX for the main and xx for the subcode.')
     parser.add_argument('--lpp', action='store_true', help='Set this if you want to load phenotypes (one phenotype per file) and run our exclusions on them. Keep in mind, that -g will only allow one file to be supplied. All others will need to be supplied through the appropriate exclusion flags.: "%(default)s" (or \'date_out\' in CHB/DBDS)')
@@ -4292,8 +4033,25 @@ if __name__ == '__main__':
         if value != default_value:
             arg_name = action.option_strings[0]  # Use the first option string (e.g., --arg1)
             argstring = argstring+(f"{arg_name}: {value} (default: {default_value})\n")
+    default_args = []
+    for action in parser._actions:
+        if action.dest == 'help':  # Skip the help argument
+            continue
+        value = getattr(args, action.dest)  # Get the current value
+        default_value = action.default  # Get the default value    
+        
+        if value == default_value:
+            default_args.append(action.option_strings[0])
 
-    main(args.f,args.g,args.i,args.j,args.ExDepExc,args.ge,args.fcol,args.gcol,args.iidcol,args.bdcol,args.sexcol,args.fsep,args.gsep,args.o,args.eM,args.din,args.don,args.qced,args.DiagTypeExclusions,args.DiagTypeInclusions,args.LifetimeExclusion,args.PostExclusion,args.OneyPriorExclusion,args.eCc,args.Fyob,args.Fgender,args.verbose,args.BuildTestSet,args.testRun,args.MatchFI,args.skipICDUpdate,args.DateFormat,args.iidstatus,args.removePointInDiagCode,args.nthreads,args.name,args.BuildEntryExitDates,args.BuildOphold,args.write_pickle, args.write_fastGWA_format, args.write_Plink2_format,args.fDates,args.iDates,args.MinMaxAge,args.ICDCM,args.lpp, args.RegisterRun, args.lowmem, args.batchsize, args.noLeadingICD, args.f2, args.recnum, args.recnum2, args.f2col, args.atc, args.atccol, args.LPR, args.PSYK, argstring)
+    main(args.f,args.g,args.i,args.j,args.ExDepExc,args.ge,args.fcol,args.gcol,args.iidcol,args.bdcol,
+         args.sexcol,args.fsep,args.gsep,args.o,args.eM,args.din,args.don,args.qced,args.DiagTypeExclusions,
+         args.DiagTypeInclusions,args.LifetimeExclusion,args.PostExclusion,args.OneyPriorExclusion,args.eCc,
+         args.Fyob,args.Fgender,args.verbose,args.BuildTestSet,args.testRun,args.MatchFI,args.skipICDUpdate,
+         args.DateFormat,args.iidstatus,args.removePointInDiagCode,args.nthreads,args.name,args.BuildEntryExitDates,
+         args.BuildOphold,args.write_pickle, args.write_fastGWA_format, args.write_Plink2_format,args.fDates,args.iDates,
+         args.MinMaxAge,args.ICDCM,args.lpp, args.RegisterRun, args.lowmem, args.batchsize, args.noLeadingICD, args.f2, 
+         args.recnum, args.recnum2, args.f2col, args.atc, args.atccol, args.atcdatecol, args.atcDates, args.LPR, args.PSYK, 
+         args.ophsep, args.Ophold, args.ini, argstring, default_args)
 
 # If wantig to start it locally in python and run through it step by step
 '''

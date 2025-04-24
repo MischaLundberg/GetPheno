@@ -41,41 +41,43 @@ diagnosis
 F33.0
 F32.0
 ```
+alternatively, you can also specify multiple phenotypes in one run, for which you will write in the first column the name and in the second comma separated (without spaces inbetween) the codes. The columns are to be tab separated. Simillar to the above coding, it can be a mix of different diagnostic classifications (i.e., ICD10 and ICD8).
+```
+MDD  F33.0,F32.0
+SCZ  F20,295.3
+BPD  F30
+```
 Don't forget to specify your header --gcol (will be otherwise set automatically to diagnosis or c_adiag depending on the cluster; see below) 
 
 A Simple run would look like
 
 ```
-./get_phenotype.py -g diagnosis.request -o diagnosis.casecontrol
+./get_pheno.py -g diagnosis.request -o diagnosis.casecontrol
 ```
 Keep in mind, that there may be some crucial flags to set: i.e. --eM
 The script will (if not told differently) update the ICD codes from i.e. F32.0 to ICD10:DF320 automatically on CHB/DBDS and IBP clusters.
 
+We offer now also the option of using a get_pheno.ini file. This allows to run it with the same base settings every time. get_pheno.py will use the get_pheno.ini, which is (1) in the local directory, from which you start it, or (2) in the directory, in which get_pheno.py is located. In every case, manually set flags will superseed the settings in the get_pheno.ini file (see an example .
+
 ### Options (Flags):
 ```
-usage: get_phenotype_revised.py [-h] -g G -o O [-f F] [-i I] [-j J] [--ge GE] [--qced QCED] [--name NAME] [--fcol FCOL] [--gcol GCOL] [--iidcol IIDCOL] [--bdcol BDCOL] [--sexcol SEXCOL] [--fsep FSEP] [--gsep GSEP] [--din DIN] [--don DON]
-                                [--ExDepExc] [--eM] [--noLeadingICD] [--ICDCM] [--iidstatus IIDSTATUS] [--DiagTypeExclusions DIAGTYPEEXCLUSIONS] [--DiagTypeInclusions DIAGTYPEINCLUSIONS] [--LifetimeExclusion LIFETIMEEXCLUSION]
-                                [--PostExclusion POSTEXCLUSION] [--OneyPriorExclusion ONEYPRIOREXCLUSION] [--fDates FDATES] [--iDates IDATES] [--DateFormat DATEFORMAT] [--MinMaxAge MINMAXAGE] [--Fyob FYOB] [--Fgender FGENDER] [--eCc]
-                                [--removePointInDiagCode] [--skipICDUpdate] [--MatchFI] [--BuildEntryExitDates] [--BuildOphold] [--RegisterRun] [--lpp] [--write_pickle] [--write_fastGWA_format] [--write_Plink2_format] [--BuildTestSet] [--testRun]
-                                [--nthreads NTHREADS] [--lowmem] [--batchsize BATCHSIZE] [--verbose]
+usage: get_pheno.py [-h] [--ini INI] -g G -o O [-f F] [--f2 F2] [--atc ATC] [-i I] [-j J] [--ge GE] [--qced QCED] [--name NAME] [--fcol FCOL] [--gcol GCOL] [--iidcol IIDCOL] [--bdcol BDCOL] [--sexcol SEXCOL] [--atccol ATCCOL] [--atcdatecol ATCDATECOL] [--fsep FSEP] [--gsep GSEP] [--ophsep OPHSEP] [--din DIN] [--don DON] [--recnum RECNUM] [--recnum2 RECNUM2] [--f2col F2COL] [--ExDepExc] [--eM]
+                                [--noLeadingICD] [--ICDCM] [--iidstatus IIDSTATUS] [--DiagTypeExclusions DIAGTYPEEXCLUSIONS] [--DiagTypeInclusions DIAGTYPEINCLUSIONS] [--LifetimeExclusion LIFETIMEEXCLUSION] [--PostExclusion POSTEXCLUSION] [--OneyPriorExclusion ONEYPRIOREXCLUSION] [--fDates FDATES] [--iDates IDATES] [--atcDates ATCDATES] [--DateFormat DATEFORMAT] [--MinMaxAge MINMAXAGE] [--Fyob FYOB]
+                                [--Fgender FGENDER] [--eCc] [--removePointInDiagCode] [--skipICDUpdate] [--MatchFI] [--BuildEntryExitDates] [--Ophold OPHOLD] [--BuildOphold] [--RegisterRun] [--lpp] [--write_pickle] [--write_fastGWA_format] [--write_Plink2_format] [--BuildTestSet] [--testRun] [--nthreads NTHREADS] [--lowmem] [--batchsize BATCHSIZE] [--PSYK] [--LPR] [--verbose]
 
-Extracts a Phenotype from input files based on IIDs and diagnostic codes. The best way to start, is to generate a test dataset: 'python get_phenotype.py -g "" -o ./ --BuildTestSet' and then run 'python get_phenotype.py -g "" -o testrun.tsv --eM
---ExDepExc --testRun'
+Extracts a Phenotype from input files based on IIDs and diagnostic codes. The best way to start, is to generate a test dataset: 'python get_phenotype.py -g "" -o ./ --BuildTestSet' and then run 'python get_phenotype.py -g "" -o testrun.tsv --eM --ExDepExc --testRun'
 
 optional arguments:
   -h, --help            show this help message and exit
+  --ini INI             Load an ini file that contains your data sources. Default: ""
   -g G                  File with all Diagnostic codes to export
   -o O                  Outfile name; dont forget to add the location, otherwise it will be saved in the local dir.
-  -f F                  Diagnosis file. Should have at least "IID", "date_in", "date_out", and "diagnosis" as columns. Names can be defined using --iidcol, --din, --don, and --fcol. No default. Will be automatically determined if not entered for
-                        GenomeDK and CHB/DBDS (DEGEN protocol)
-  --f2 F2               Secondary diagnosis file. This is meant to be used if you have files with secondary diagnosis information as i.e. in Denmark. Here we would usually use the 'recnum' to merge these entries with '-f'. These files also contain
-                        less information as the '-f' files. Should have at least "recnum", and "diagnosis" as columns. Names can be defined using --recnum2 and --f2col. The recnum column in the '-f' files can be specified using --recnum. Default:
-                        ""
+  -f F                  Diagnosis file. Should have at least "IID", "date_in", "date_out", and "diagnosis" as columns. Names can be defined using --iidcol, --din, --don, and --fcol. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN protocol)
+  --f2 F2               Secondary diagnosis file. This is meant to be used if you have files with secondary diagnosis information as i.e. in Denmark. Here we would usually use the 'recnum' to merge these entries with '-f'. These files also contain less information as the '-f' files. Should have at least "recnum", and "diagnosis" as columns. Names can be defined using --recnum2 and --f2col. The recnum column in the
+                        '-f' files can be specified using --recnum. Default: ""
   --atc ATC             PRescription information file. Will be handeld simillar to -f but needs additional information to be specified: --atccol. Default: ""
-  -i I                  This file should adds based on a mapping using the supplied "IID" column information about Gender/Sex (needed), Brithdate (needed) ... e.g., information from stamdata file. No default. Will be automatically determined if not
-                        entered for GenomeDK and CHB/DBDS (DEGEN protocol)
-  -j J                  This file should have additional "IID" information e.g. date of entry to cohort. This is not needed and can also be skipped. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN
-                        protocol)
+  -i I                  This file should adds based on a mapping using the supplied "IID" column information about Gender/Sex (needed), Brithdate (needed) ... e.g., information from stamdata file. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN protocol)
+  -j J                  This file should have additional "IID" information e.g. date of entry to cohort. This is not needed and can also be skipped. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN protocol)
   --ge GE               General exclusion list. This referrs to a list of IIDs that should be excluded from the study. Within CHB/DBDS it will default to /data/preprocessed/genetics/chb_degen_freeze_20210503/degen_exclusion_latest
   --qced QCED           List with all IIDs that pass initial QC. Default: "" (or '/data/preprocessed/genetics/chb_degen_freeze_20210503/DEGEN_GSA_FINAL.fam' in CHB/DBDS)
   --name NAME           Define your main Phenotype name. Defaults to "MainPheno"
@@ -85,8 +87,11 @@ optional arguments:
   --bdcol BDCOL         Columname of Birthdate in files. Defaults to "birthdate"
   --sexcol SEXCOL       Columname of Sex/Gender in files. Defaults to "sex"
   --atccol ATCCOL       Columname of ATC codes in files. Defaults to ""
+  --atcdatecol ATCDATECOL
+                        Columname of ATC prescription date column in the --atc file(s). Defaults to ""
   --fsep FSEP           Separator of -f i.e. tab; default "," (or "\t" in CHB/DBDS)
   --gsep GSEP           Separator of -g i.e. tab; default "," (or "\t" in CHB/DBDS)
+  --ophsep OPHSEP       Separator of Ophold file - currently only available on CHB/DBDS,DST i.e. "\t"; default "," (or "\t" in CHB/DBDS)
   --din DIN             Columname of first diagnosis date. e.g. 'd_inddto' or 'date_in'. Default: "d_inddto" (or 'date_in' in CHB/DBDS)
   --don DON             Columname of first diagnosis date. e.g. 'd_uddto' or 'date_out'. Default: "d_uddto" (or 'date_out' in CHB/DBDS)
   --recnum RECNUM       Columname of the recnum field in -f files. Default: "" (or 'recnum' on NCRR)
@@ -99,33 +104,25 @@ optional arguments:
   --iidstatus IIDSTATUS
                         Information about the status of the IID, i.e. if they withdrew their consent (), moved outside the country (), or died (). Default: ""
   --DiagTypeExclusions DIAGTYPEEXCLUSIONS
-                        List of diagnostic types to exclude. e.g. "H,M". Potential c_types may be +,A,B,C,G,M,H. A (main diagnosis), B (secondary diagnosis), G (grundmorbus), H (referral), + (secondary diagnosis), C (complication), and M
-                        (temporary) are all possible diagnosis types. From 1995 to 1998, registering a referral diagnosis (H) was optional; thereafter, it became mandatory for certain referral methods. Grundmorbus (G) was optional from 1995 to
-                        2001, used exclusively for psychiatric patients in 2002–2003, and then discontinued entirely. Complication (C) and temporary diagnosis (M) were both discontinued at the end of 2013. Default: ""
+                        List of diagnostic types to exclude. e.g. "H,M". Potential c_types may be +,A,B,C,G,M,H. A (main diagnosis), B (secondary diagnosis), G (grundmorbus), H (referral), + (secondary diagnosis), C (complication), and M (temporary) are all possible diagnosis types. From 1995 to 1998, registering a referral diagnosis (H) was optional; thereafter, it became mandatory for certain referral methods.
+                        Grundmorbus (G) was optional from 1995 to 2001, used exclusively for psychiatric patients in 2002–2003, and then discontinued entirely. Complication (C) and temporary diagnosis (M) were both discontinued at the end of 2013. Default: ""
   --DiagTypeInclusions DIAGTYPEINCLUSIONS
-                        List of diagnostic types to include. e.g. "A,B". Potential c_types may be +,A,B,C,G,M,H. A (main diagnosis), B (secondary diagnosis), G (grundmorbus), H (referral), + (secondary diagnosis), C (complication), and M
-                        (temporary) are all possible diagnosis types. From 1995 to 1998, registering a referral diagnosis (H) was optional; thereafter, it became mandatory for certain referral methods. Grundmorbus (G) was optional from 1995 to
-                        2001, used exclusively for psychiatric patients in 2002–2003, and then discontinued entirely. Complication (C) and temporary diagnosis (M) were both discontinued at the end of 2013. Default: ""
+                        List of diagnostic types to include. e.g. "A,B". Potential c_types may be +,A,B,C,G,M,H. A (main diagnosis), B (secondary diagnosis), G (grundmorbus), H (referral), + (secondary diagnosis), C (complication), and M (temporary) are all possible diagnosis types. From 1995 to 1998, registering a referral diagnosis (H) was optional; thereafter, it became mandatory for certain referral methods.
+                        Grundmorbus (G) was optional from 1995 to 2001, used exclusively for psychiatric patients in 2002–2003, and then discontinued entirely. Complication (C) and temporary diagnosis (M) were both discontinued at the end of 2013. Default: ""
   --LifetimeExclusion LIFETIMEEXCLUSION
-                        Define Lifetime exclusions (if a case has any of the listed codes, it will be excluded). This should be a file containing either one row with all codes listed (comma separated) or per row a exclusion name, followed by a list
-                        of diagnostic codes (similar to the input). e.g. "BPD
-                        ICD10:F30,ICD10:F30.0,ICD10:F30.1,ICD10:F30.2,ICD10:F30.8,ICD10:F30.9,ICD10:F31,ICD10:F31.0,ICD10:F31.1,ICD10:F31.2,ICD10:F31.3,ICD10:F31.4,ICD10:F31.5,ICD10:F31.6,ICD10:F31.7,ICD10:F31.8,ICD10:F31.9" If you are using
-                        CHB/DBDS data, please remember, that the ICD10 codes have to start with ICD10:D***, e.g. ICD10:DF33.0. Default: ""
+                        Define Lifetime exclusions (if a case has any of the listed codes, it will be excluded). This should be a file containing either one row with all codes listed (comma separated) or per row a exclusion name, followed by a list of diagnostic codes (similar to the input). e.g. "BPD
+                        ICD10:F30,ICD10:F30.0,ICD10:F30.1,ICD10:F30.2,ICD10:F30.8,ICD10:F30.9,ICD10:F31,ICD10:F31.0,ICD10:F31.1,ICD10:F31.2,ICD10:F31.3,ICD10:F31.4,ICD10:F31.5,ICD10:F31.6,ICD10:F31.7,ICD10:F31.8,ICD10:F31.9" If you are using CHB/DBDS data, please remember, that the ICD10 codes have to start with ICD10:D***, e.g. ICD10:DF33.0. Default: ""
   --PostExclusion POSTEXCLUSION
-                        Define Post exclusions (if a case has any of the listed codes, all main diagnoses after the first occuring date of the listed codes will be excluded). This should be a file containing either one row with all codes listed
-                        (comma separated) or per row a exclusion name, followed by a list of diagnostic codes (similar to the input). Default: ""
+                        Define Post exclusions (if a case has any of the listed codes, all main diagnoses after the first occuring date of the listed codes will be excluded). This should be a file containing either one row with all codes listed (comma separated) or per row a exclusion name, followed by a list of diagnostic codes (similar to the input). Default: ""
   --OneyPriorExclusion ONEYPRIOREXCLUSION
-                        Define One Year Prio exclusions (all entries for a case that happen within one year prior to any date of the listed codes, these entries will be excluded). This should be a file containing either one row with all codes
-                        listed (comma separated) or per row a exclusion name, followed by a list of diagnostic codes (similar to the input). Default: ""
-  --fDates FDATES       Which columns inf your -f file are Dates? This automatically uses the columns you supplied under --bdcol, --don and --din. You only need to specify this, if you have additonal Dates that should be reformatted. Specify as
-                        comma separated list without spaces. Default: "[]"
-  --iDates IDATES       Which columns inf your -i file are Dates? This automatically uses the columns you supplied under --bdcol, --don and --din. You only need to specify this, if you have additonal Dates that should be reformatted. Specify as
-                        comma separated list without spaces. Default: "[]"
+                        Define One Year Prio exclusions (all entries for a case that happen within one year prior to any date of the listed codes, these entries will be excluded). This should be a file containing either one row with all codes listed (comma separated) or per row a exclusion name, followed by a list of diagnostic codes (similar to the input). Default: ""
+  --fDates FDATES       Which columns in your -f file are Dates? This automatically uses the columns you supplied under --bdcol, --don and --din. You only need to specify this, if you have additonal Dates that should be reformatted. Specify as comma separated list without spaces. Default: "[]"
+  --iDates IDATES       Which columns in your -i file are Dates? This automatically uses the columns you supplied under --bdcol, --don and --din. You only need to specify this, if you have additonal Dates that should be reformatted. Specify as comma separated list without spaces. Default: "[]"
+  --atcDates ATCDATES   Which columns in your --atc file are Dates? This automatically uses the columns you supplied under --bdcol, --don and --din. You only need to specify this, if you have additonal Dates that should be reformatted. Specify as comma separated list without spaces. Default: "[]"
   --DateFormat DATEFORMAT
                         Format of Dates in your data. Default "%d/%m/%Y" --> 31/01/1980
   --MinMaxAge MINMAXAGE
-                        Filter by Min and Max Age at first diagnosis. This should be given as comma separated numerics in the form of x,y; i.e. 18,50 or 17.99,50.01, 0,0 (no exclusion) and is interpreted as inclusion as case if first diagnosis age
-                        >x and <y. Default: "0,0"
+                        Filter by Min and Max Age at first diagnosis. This should be given as comma separated numerics in the form of x,y; i.e. 18,50 or 17.99,50.01, 0,0 (no exclusion) and is interpreted as inclusion as case if first diagnosis age >x and <y. Default: "0,0"
   --Fyob FYOB           Filter by Year of Birth. Everyone before this date will be excluded. Date needs to be given in the following format: "YYYY-MM-DD". Default: ""
   --Fgender FGENDER     Filter by gender. Only Individuals with the selected Gender ("F" or "M") will be included in the output. Default: ""
   --eCc                 Exclude Individuals that are identified as Controls and are only part of CHB and not DBDS. This flag only works when ran on CHB/DBDS cluster.
@@ -134,13 +131,11 @@ optional arguments:
   --skipICDUpdate       If your supplied diagnostic codes are already in line with your datastructure, you can use this toggle to skip the updating (highly recommended if your input is in a correct format!)
   --MatchFI             If you want to keep only the IIDs overlapping between -g and -f use this flag.
   --BuildEntryExitDates
-                        If you want to extract additional information about the controls. This basically adds first and last date of observation (any diagnostic code) and writes it to first in date, last out date, in_dates, and out_dates. NB: This
-                        can be used if you don't have an Entry and Exit date known. Be aware, this will increase time needed for calculation.
+                        If you want to extract additional information about the controls. This basically adds first and last date of observation (any diagnostic code) and writes it to first in date, last out date, in_dates, and out_dates. NB: This can be used if you don't have an Entry and Exit date known. Be aware, this will increase time needed for calculation.
+  --Ophold OPHOLD       If you want to load and process the ophold file (on IBP Cluster only). Default ""
   --BuildOphold         If you want to update the ophold file used (on IBP Cluster only).
-  --RegisterRun         We will try to determine this automatically based on known Servers. If you are using this method on an unknown Server and your diagnostic codes are in the follwing format DYXXxx; where Y stands for the letter of the group
-                        and XX for the main and xx for the subcode.
-  --lpp                 Set this if you want to load phenotypes (one phenotype per file) and run our exclusions on them. Keep in mind, that -g will only allow one file to be supplied. All others will need to be supplied through the appropriate
-                        exclusion flags.: "False" (or 'date_out' in CHB/DBDS)
+  --RegisterRun         We will try to determine this automatically based on known Servers. If you are using this method on an unknown Server and your diagnostic codes are in the follwing format DYXXxx; where Y stands for the letter of the group and XX for the main and xx for the subcode.
+  --lpp                 Set this if you want to load phenotypes (one phenotype per file) and run our exclusions on them. Keep in mind, that -g will only allow one file to be supplied. All others will need to be supplied through the appropriate exclusion flags.: "False" (or 'date_out' in CHB/DBDS)
   --write_pickle        If you want to write the results to a pickle format in addition to the standard output.
   --write_fastGWA_format
                         If you want to write the phenotype into fastGWA format.
@@ -155,7 +150,6 @@ optional arguments:
   --PSYK                Experimental! - To run only based on the PSYK diagnoses.
   --LPR                 Experimental! - To run only based on the LPR diagnoses.
   --verbose             Verbose output
-
 ```
 
 ### Minimum output in file based on standard settings:
@@ -174,16 +168,6 @@ optional arguments:
 |birthdate|Birthdate|
 |Age_FirstDx|Age at first diagnosis|
 
-#### Further examples based on CHB/DBDS cluster (might be different on other sources; this only adds information from the input files without processing it):
-|Column|Explanation|
-| ------------- | ------------- |
-|dbds|If on CHB/DBDS cluster, TRUE/FALSE if this IID is from DBDS|
-|degen_old|If on CHB/DBDS cluster, TRUE/FALSE if this IID is from old CHB|
-|degen_new|If on CHB/DBDS cluster, TRUE/FALSE if this IID is from curren CHB|
-|C_STATUS||
-|D_STATUS_HEN_START||
-|D_FODDATO||
-|C_KON||
 ### Additional output in file based on Covariate or ExDEP settings:
 |Column|Explanation|
 | ------------- | ------------- |

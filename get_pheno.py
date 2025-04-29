@@ -663,8 +663,8 @@ def generate_sample_ini(outfile='get_pheno.ini'):
         'DateFormat': '%%d/%%m/%%Y',
         'remove_point_in_diag_request': 'True',
         'remove_ICD_naming': 'True',
-        'lpr_recnummer': 'k_recnum',
-        'lpr2nd_recnummer': 'v_recnum',
+        'lpr_recnummer': '',
+        'lpr2nd_recnummer': '',
         'diagnostic2nd_col': 'c_diag',
         'sexcol': 'kqn',
         '; Optionally override when only running LPR or PSYK:': '',
@@ -774,13 +774,13 @@ def process_entry(entry, remove_leading, eM, mode, prefix, remove_point):
     if entry.startswith("ICD9-CM:"):
         if mode in ("ICDCM","default"):
             res = entry.replace("ICD9-CM:", "", 1).upper()
-            res = res if remove_leading else "ICD9:" + res
+            res = res if remove_leading else "ICD9-CM:" + res
             return res.replace('.', '') if remove_point else res
         return None  # skip in other modes
     if entry.startswith("ICD10-CM:"):
         if mode in ("ICDCM","default"):
             res = entry.replace("ICD10-CM:", "", 1).upper()
-            res = res if remove_leading else "ICD10:" + res
+            res = res if remove_leading else "ICD10-CM:" + res
             return res.replace('.', '') if remove_point else res
         return None  # skip in other modes
 
@@ -2987,6 +2987,8 @@ def batch_load_lprfile(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnummer
     temp_file = str(uuid.uuid4())[:4]+".filtered_temp.csv"
     build_temp_file(lprfile, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
     lprfile = temp_file
+    del df1_rows_to_keep
+
     #Get the recnums from lprfile to exctract these from the lpr2nd_file
     lpr_recnummer_batch = pd.read_csv(lprfile, sep = fsep, usecols = [lpr_recnummer])[lpr_recnummer].unique()
     print(lpr_recnummer_batch)
@@ -2995,7 +2997,7 @@ def batch_load_lprfile(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnummer
         temp_file = str(uuid.uuid4())[:4]+".filtered_temp.csv"
         build_temp_file(lpr2nd_file, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
         lpr2nd_file = temp_file
-    
+    del df1_rows_to_keep
     # Delegate all file loading and merging to process_lpr_data.
     df_new = process_lpr_data(
         lpr_file=lprfile,
@@ -3017,6 +3019,8 @@ def batch_load_lprfile(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnummer
 
     # Append the newly loaded data to the existing DataFrame.
     df = pd.concat([df, df_new], ignore_index=True, sort=False)
+    del df_new
+    gc.collect()
     if verbose:
         print(f"Finished loading batch {batch_num + 1}. DataFrame shape: {df.shape}")
     return df
@@ -3285,7 +3289,7 @@ def load_config(filename="get_pheno.ini"):
 
 #need to handle double counts and exclusions
 def main(lpr_file, pheno_request, stam_file, addition_information_file, use_predefined_exdep_exclusions, general_exclusions, diagnostic_col, 
-         pheno_requestcol, iidcol, birthdatecol, sexcol, fsep, gsep, outfile, exact_match, input_date_in_name, input_date_out_name, qced_iids, 
+         pheno_requestcol, iidcol, birthdatecol, sexcol, fsep, isep, jsep, gsep, outfile, exact_match, input_date_in_name, input_date_out_name, qced_iids, 
          ctype_excl, ctype_incl, lifetime_exclusions_file, post_exclusions_file, oneYearPrior_exclusions_file, exclCHBcontrols, Filter_YoB, 
          Filter_Gender, verbose, Build_Test_Set, test_run, MatchFI, skip_icd_update, DateFormat_in, iidstatus_col, remove_point_in_diag_request, 
          num_threads, main_pheno_name, BuildEntryExitDates, build_ophold, write_pickle, write_fastGWA_format, write_Plink2_format, lpr_cols_to_read_as_date, 
@@ -3771,21 +3775,21 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 else:
                     # Identify the set of columns that are dates
                     try:
-                        df_header = pd.read_csv(stamfile, sep=fsep, dtype=object, nrows=0)
+                        df_header = pd.read_csv(stamfile, sep=isep, dtype=object, nrows=0)
                     except TypeError:
-                        df_header = pd.read_csv(stamfile, sep=fsep, dtype=object, nrows=0, engine='python')
+                        df_header = pd.read_csv(stamfile, sep=isep, dtype=object, nrows=0, engine='python')
                     if(df_header.columns.empty):
                         print("ERROR: Could not load -i file: ",stamfile)
                         sys.exit()
                     if stam_cols_to_read_as_date:
                         stam_cols_to_read_as_date = list(set([col for col in stam_cols_to_read_as_date if col in df_header]))
                         print("INFO: (STAM) We identified the following columns to be present and to be used as date columns: ",stam_cols_to_read_as_date)  
-                        df = pd.read_csv(stamfile, sep=fsep, dtype=object, dayfirst=DayFirst, parse_dates=stam_cols_to_read_as_date)
+                        df = pd.read_csv(stamfile, sep=isep, dtype=object, dayfirst=DayFirst, parse_dates=stam_cols_to_read_as_date)
                     else:
                         try:
-                            df = pd.read_csv(stamfile, sep=fsep)
+                            df = pd.read_csv(stamfile, sep=isep)
                         except TypeError:
-                            df = pd.read_csv(stamfile, sep=fsep, engine='python', dtype=str)
+                            df = pd.read_csv(stamfile, sep=isep, engine='python', dtype=str)
                     del(df_header)
                 df3 = pd.concat([df3, df], ignore_index=True, sort=False)
                 del(df)
@@ -3798,9 +3802,9 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 df3 = pd.read_stata(stam_file)
             else:
                 try:
-                    df_header = pd.read_csv(stam_file, sep=fsep, dtype=object, nrows=0)
+                    df_header = pd.read_csv(stam_file, sep=isep, dtype=object, nrows=0)
                 except TypeError:
-                    df_header = pd.read_csv(stam_file, sep=fsep, dtype=object, nrows=0, engine='python')
+                    df_header = pd.read_csv(stam_file, sep=isep, dtype=object, nrows=0, engine='python')
                 if(df_header.columns.empty):
                     print("ERROR: Could not load -i file: ",stam_file)
                     sys.exit()
@@ -3810,10 +3814,10 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                     df3 = pd.read_csv(stam_file, sep=fsep, dtype=object, dayfirst=DayFirst, parse_dates=stam_cols_to_read_as_date)
                 else:
                     try:
-                        df3 = pd.read_csv(stam_file, sep=fsep)
+                        df3 = pd.read_csv(stam_file, sep=isep)
                     except Exception as e:
                         print(f"WARNING: Failed to read CSV with dtype=str. Error: {e}")
-                        df3 = pd.read_csv(stam_file, sep=fsep, engine='python', dtype=str)
+                        df3 = pd.read_csv(stam_file, sep=isep, engine='python', dtype=str)
                 del(df_header)
         print("Info: Finished loading -i file(s)")
         if verbose:
@@ -3894,7 +3898,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                     if dta_input:
                         df = pd.read_stata(additionfile)# Read the CSV file and append it to df4
                     else:
-                        df = pd.read_csv(additionfile, sep=fsep, dtype=str)
+                        df = pd.read_csv(additionfile, sep=jsep, dtype=str)
                     df4 = pd.concat([df4, df], ignore_index=True, sort=False)
                     del(df)
                 del(file_paths)
@@ -3902,7 +3906,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 if dta_input:
                         df4 = pd.read_stata(addition_information_file)
                 else:
-                    df4 = pd.read_csv(addition_information_file, sep=fsep, dtype=str)
+                    df4 = pd.read_csv(addition_information_file, sep=jsep, dtype=str)
             if (birthdatecol in df4.columns and birthdatecol != "birthdate"):
                 df4.rename(columns={birthdatecol: "birthdate"},inplace=True)
                 if (verbose):
@@ -4028,6 +4032,8 @@ if __name__ == '__main__':
     parser.add_argument('--atccol', required=False, default="", help='Columname of ATC codes in files. Defaults to "%(default)s"')
     parser.add_argument('--atcdatecol', required=False, default="", help='Columname of ATC prescription date column in the --atc file(s). Defaults to "%(default)s"')
     parser.add_argument('--fsep', required=False, default=",", help='Separator of -f i.e. tab; default "%(default)s" (or "\\t\" in CHB/DBDS)')
+    parser.add_argument('--isep', required=False, default=",", help='Separator of -i i.e. tab; default "%(default)s" (or "\\t\" in CHB/DBDS)')
+    parser.add_argument('--jsep', required=False, default=",", help='Separator of -j i.e. tab; default "%(default)s" (or "\\t\" in CHB/DBDS)')
     parser.add_argument('--gsep', required=False, default=",", help='Separator of -g i.e. tab; default "%(default)s" (or "\\t\" in CHB/DBDS)')
     parser.add_argument('--ophsep', required=False, default=",", help='Separator of Ophold file - currently only available on CHB/DBDS,DST i.e. "\\t\"; default "%(default)s" (or "\\t\" in CHB/DBDS)')
     parser.add_argument('--din',required=False, default='d_inddto', help='Columname of first diagnosis date. e.g. \'d_inddto\' or \'date_in\'. Default: "%(default)s" (or \'date_in\' in CHB/DBDS)')
@@ -4097,7 +4103,7 @@ if __name__ == '__main__':
             default_args.append(action.option_strings[0])
 
     main(args.f,args.g,args.i,args.j,args.ExDepExc,args.ge,args.fcol,args.gcol,args.iidcol,args.bdcol,
-         args.sexcol,args.fsep,args.gsep,args.o,args.eM,args.din,args.don,args.qced,args.DiagTypeExclusions,
+         args.sexcol,args.fsep,args.isep,args.jsep,args.gsep,args.o,args.eM,args.din,args.don,args.qced,args.DiagTypeExclusions,
          args.DiagTypeInclusions,args.LifetimeExclusion,args.PostExclusion,args.OneyPriorExclusion,args.eCc,
          args.Fyob,args.Fgender,args.verbose,args.BuildTestSet,args.testRun,args.MatchFI,args.skipICDUpdate,
          args.DateFormat,args.iidstatus,args.removePointInDiagCode,args.nthreads,args.name,args.BuildEntryExitDates,

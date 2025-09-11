@@ -1394,7 +1394,7 @@ def index_diag_file(
         if ".gz" in path:
             reader = pd.read_csv(path, engine='python', compression = "gzip", dtype=dtypes,  sep=separator, chunksize=chunksize)
         else:
-            reader = pd.read_csv(path, engine='python', compression = 'infer', dtype=dtypes, sep=separator, chunksize=chunksize, low_memory=False)
+            reader = pd.read_csv(path, engine='python', compression = 'infer', dtype=dtypes, sep=separator, chunksize=chunksize)
         try:
             first = next(reader)
         except StopIteration:
@@ -1871,96 +1871,96 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                                  BuildEntryExitDates, lifetime_exclusions_file, post_exclusions_file, oneYearPrior_exclusions_file, outfile, write_Plink2_format, 
                                  write_fastGWA_format, write_pickle, n_stam_iids, exclCHBcontrols, iidstatus_col, addition_information_file, sexcol, input_date_in_name, 
                                  input_date_out_name, append, df4, icdprefix, noLeadingICD, lifetime_exclusions, oneYearPrior_exclusions, post_exclusions, covariates):
-    print(f"Starting process_pheno_and_exclusions with df1.head(5):{df1.head(5)}\nAnd df3.head(5): {df3.head(5)}")
+    print(f"[process_pheno_and_exclusions] Starting with df1.head(5):{df1.head(5)}\nAnd df3.head(5): {df3.head(5)}")
     if MatchFI:
-        print("Restraining df1 and df3 (-f and -i) to only overlapping IIDs. This can be avoided by using --MatchFI")
+        print("[process_pheno_and_exclusions] Restraining df1 and df3 (-f and -i) to only overlapping IIDs. This can be avoided by using --MatchFI")
         # use only those IIDs that are given in df3 and df1. 
         df3_N_before = str(df3[iidcol].nunique())
         df1_N_before = str(df1[iidcol].nunique())
         if df3_N_before > 0:
             df3 = df3[df3[iidcol].isin(df1[iidcol])]
             df1 = df1[df1[iidcol].isin(df3[iidcol])]
-            print(f"After Restraining df1 {str(df1[iidcol].nunique())}({df1_N_before}) and df3 {str(df3[iidcol].nunique())}({df3_N_before}); now(before)")
+            print(f"[process_pheno_and_exclusions] After Restraining df1 {str(df1[iidcol].nunique())}({df1_N_before}) and df3 {str(df3[iidcol].nunique())}({df3_N_before}); now(before)")
         else:
-            print(f"WARNING: df3 had {df3_N_before} entries. Skipping this step and keeping all df1 entries. Check if you did load the correct df3 (-i) file.")
+            print(f"WARNING: df3 had {df3_N_before} entries. Skipping this step and keeping all df1 entries. Check if you did load the correct df3 (-i) file. [process_pheno_and_exclusions] ")
     else:
-        print("Restraining df1 to IIDs overlapping with df3 (-f to -i). As df3 (-i) is supposed to supply the information like Birthdate and so on and it would not make much sense to go forward without this information.")
+        print("[process_pheno_and_exclusions] Restraining df1 to IIDs overlapping with df3 (-f to -i). As df3 (-i) is supposed to supply the information like Birthdate and so on and it would not make much sense to go forward without this information.")
         # use only those IIDs that are given in df3. 
         if df3[iidcol].nunique() > 0:
             df1_N_before = str(df1[iidcol].nunique())
             df1 = df1[df1[iidcol].isin(df3[iidcol])]
-            print(f"After Restraining df1 {str(df1[iidcol].nunique())}({df1_N_before}) and df3 ({str(df3[iidcol].nunique())}); now(before)")
+            print(f"[process_pheno_and_exclusions] After Restraining df1 {str(df1[iidcol].nunique())}({df1_N_before}) and df3 ({str(df3[iidcol].nunique())}); now(before)")
         else:
-            print(f"WARNING: df3 had {df3[iidcol].nunique()} entries. Skipping this step and keeping all df1 entries. Check if you did load the correct df3 (-i) file.")
+            print(f"WARNING: df3 had {df3[iidcol].nunique()} entries. Skipping this step and keeping all df1 entries. Check if you did load the correct df3 (-i) file. [process_pheno_and_exclusions] ")
     gc.collect()
     if (verbose):
-        print(f"In process_pheno_and_exclusions. df1.head(5):{df1.head(5)}; df3.head(5):{df3.head(5)}")
-        print(f"In process_pheno_and_exclusions. df1.columns:{df1.columns}; df3.columns:{df3.columns}")
-    print(f"diagnostic_col: {diagnostic_col}")
+        print(f"[process_pheno_and_exclusions] df1.head(5):{df1.head(5)}; df3.head(5):{df3.head(5)}")
+        print(f"[process_pheno_and_exclusions] df1.columns:{df1.columns}; df3.columns:{df3.columns}")
+    print(f"[process_pheno_and_exclusions] diagnostic_col: {diagnostic_col}")
     if diagnostic_col != "diagnosis":
         if diagnostic_col in df1.columns:
             df1.rename(columns={diagnostic_col: "diagnosis"}, inplace=True)
         if diagnostic_col in df3.columns:
             df3.rename(columns={diagnostic_col: "diagnosis"}, inplace=True)
         if (verbose):
-            print(f"After renaming \"{diagnostic_col}\" to \"diagnosis\". df1.columns:{df1.columns}; df3.columns:{df3.columns}")
+            print(f"[process_pheno_and_exclusions] After renaming \"{diagnostic_col}\" to \"diagnosis\". df1.columns:{df1.columns}; df3.columns:{df3.columns}")
     diagnostic_col = "diagnosis"
     if (verbose):
-        print("Mem after loading all input:")
+        print("[process_pheno_and_exclusions] Mem after loading all input:")
         usage()
     if (ctype_excl != ""):
-        if (cluster_run == "CHB_DBDS"):
+        if (cluster_run in ["CHB_DBDS","IBP_DST","IBP_computerome"]):
             ctype_excllusions = ctype_excl.split(",")
             len_before = len(df1)
             df1 = df1.loc[~df1["type"].isin(ctype_excllusions)]
             len_after = len(df1)
-            print("Excluded ",len_before-len_after," Diagnoses from the main input file due to ctype_excllusions ",ctype_excl,". This does not reflect case/control diagnoses; This is only a general information.")
+            print("[process_pheno_and_exclusions] Excluded ",len_before-len_after," Diagnoses from the main input file due to ctype_excllusions ",ctype_excl,". This does not reflect case/control diagnoses; This is only a general information.")
         else:
-            print("Warning: You selected to exclude c_types but you are not running this method on a CHB/DBDS Server!")
+            print("WARNING: You selected to exclude c_types but you are not running this method on a CHB/DBDS Server! [process_pheno_and_exclusions] ")
     if (ctype_incl != ""):
-        if (cluster_run == "CHB_DBDS"):
+        if (cluster_run  in ["CHB_DBDS","IBP_DST","IBP_computerome"]):
             ctype_inclusions = ctype_incl.split(",")
             len_before = len(df1)
             df1 = df1.loc[df1["type"].isin(ctype_inclusions)]
             len_after = len(df1)
-            print("Excluded ",len_before-len_after," Diagnoses from the main input file due to ctype_inclusions ",ctype_incl,". This does not reflect case/control diagnoses; This is only a general information.")
+            print("[process_pheno_and_exclusions] Excluded ",len_before-len_after," Diagnoses from the main input file due to ctype_inclusions ",ctype_incl,". This does not reflect case/control diagnoses; This is only a general information.")
         else:
-            print("Warning: You selected to include only certain c_types but you are not running this method on a CHB/DBDS Server!")
+            print("WARNING: You selected to include only certain c_types but you are not running this method on a CHB/DBDS Server! [process_pheno_and_exclusions] ")
     if (Filter_YoB != ""):
-        if cluster_run == "CHB_DBDS":
+        if (cluster_run in ["CHB_DBDS","IBP_DST","IBP_computerome"]):
             Filter_YoB = Filter_YoB
             iids_to_keep = df3.loc[df3['birthdate'] > Filter_YoB,iidcol]
             len_before = len(df1)            
             df1 = df1.loc[df1[iidcol].isin(iids_to_keep)]
             len_after = len(df1)
-            print("Excluded ",len_before-len_after," of ",len_before," IIDs due to Birthdate before selected date ",Filter_YoB,".")
+            print("[process_pheno_and_exclusions] Excluded ",len_before-len_after," of ",len_before," IIDs due to Birthdate before selected date ",Filter_YoB,".")
             del iids_to_keep
         else:
-            print("Warning: Selected filter is not implemented yet!")
+            print("WARNING: Selected filter is not implemented yet! [process_pheno_and_exclusions] ")
     if (Filter_Gender != ""):
-        if cluster_run == "CHB_DBDS":
+        if (cluster_run in ["CHB_DBDS","IBP_DST","IBP_computerome"]):
             iids_to_keep = df3.loc[df3['sex'] == Filter_Gender,iidcol]
             len_before = len(df1)            
             df1 = df1.loc[df1[iidcol].isin(iids_to_keep)]
             len_after = len(df1)
-            print("Excluded ",len_before-len_after," of ",len_before," IIDs due to Gender filter ",Filter_Gender,".")
+            print("[process_pheno_and_exclusions] Excluded ",len_before-len_after," of ",len_before," IIDs due to Gender filter ",Filter_Gender,".")
             del iids_to_keep
         else:
-            print("Warning: Selected filter is not implemented yet!")
+            print("WARNING: Selected filter is not implemented yet! [process_pheno_and_exclusions] ")
     if (len(df1) == 0):
-        print("Error: No IIDs left after initial Filtering. Consider using different Filters. Exiting")
+        print("ERROR: No IIDs left after initial Filtering. Consider using different Filters. Exiting [process_pheno_and_exclusions] ")
         exit()
     gc.collect()
     if (qced_iids != ""):
         try:
-            print("Filtering now for QC'ed Individuals ("+qced_iids+")")
+            print("[process_pheno_and_exclusions] Filtering now for QC'ed Individuals ("+qced_iids+")")
             if ("fam" in qced_iids):
                 qced_iids_to_keep = pd.read_csv(qced_iids, engine='python', sep = "\t", header = None, dtype=str)
             else:
                 qced_iids_to_keep = pd.read_csv(qced_iids, engine='python', sep = None, header = 'infer', dtype=str)
             qced_iids_to_keep.rename(columns={qced_iids_to_keep.columns[0]: iidcol}, inplace=True)
             if (verbose):
-                print("Assuming the first column contains the IID")
+                print("[process_pheno_and_exclusions] Assuming the first column contains the IID")
             rows_to_drop = df1[~df1[iidcol].isin(qced_iids_to_keep[iidcol])] 
             if len(rows_to_drop) != 0:
                 tmp = rows_to_drop[iidcol].copy()
@@ -1971,17 +1971,17 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                 n_exclusions = 0
             del rows_to_drop
             df1 = df1[df1[iidcol].isin(qced_iids_to_keep[iidcol])]
-            print("Dropping "+str(n_exclusions)+" Individual(s) due to QC ("+qced_iids+")")
+            print("[process_pheno_and_exclusions] Dropping "+str(n_exclusions)+" Individual(s) due to QC ("+qced_iids+")")
         except Exception as e:
-            print(f"An error occured while loading or processing the QC file. This step will now be skipped.\nHead of the file: {qced_iids_to_keep.head(5)}\nError message: {e}")
+            print(f"[process_pheno_and_exclusions] An error occured while loading or processing the QC file. This step will now be skipped.\nHead of the file: {qced_iids_to_keep.head(5)}\nError message: {e}")
             qced_iids = ""
     if (general_exclusions != ""):
         try:
-            print("Filtering now for general exclusion Individuals ("+general_exclusions+")")
+            print("[process_pheno_and_exclusions] Filtering now for general exclusion Individuals ("+general_exclusions+")")
             # Load the IIDs that should be excluded from file as a DataFrame
             iids_to_exclude = pd.read_csv(general_exclusions, engine='python', sep=" ", dtype=str)
             if (verbose):
-                print(f"iids_to_exclude.head(5): {iids_to_exclude.head(5)}")
+                print(f"[process_pheno_and_exclusions] iids_to_exclude.head(5): {iids_to_exclude.head(5)}")
             iids_to_exclude.rename(columns={ iids_to_exclude.columns[0]: iidcol}, inplace=True)
             # Identify rows in df1 that have matching rows in iids_to_exclude (where iids_to_exclude values are not NaN)
             rows_to_drop = df1[df1[iidcol].isin(iids_to_exclude[iidcol])]
@@ -1994,12 +1994,12 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                 n_exclusions = 0
             del rows_to_drop
             df1 = df1[~df1[iidcol].isin(iids_to_exclude[iidcol])]
-            print("Dropping "+str(n_exclusions)+" Individual(s) due to general exclusion (depending on input file, but could be e.g. due to withdrawal of consent)")
+            print("[process_pheno_and_exclusions] Dropping "+str(n_exclusions)+" Individual(s) due to general exclusion (depending on input file, but could be e.g. due to withdrawal of consent)")
             if (verbose):
-                print("Mem after building general exclusions and excluding these from the base file:")
+                print("[process_pheno_and_exclusions] Mem after building general exclusions and excluding these from the base file:")
                 usage()
         except Exception as e:
-            print(f"An error occured while loading or processing the General exclusion file. This step will now be skipped.\nError message: {e}")
+            print(f"[process_pheno_and_exclusions] An error occured while loading or processing the General exclusion file. This step will now be skipped.\nError message: {e}")
             general_exclusions = ""
     gc.collect()
     if (len(df1) == 0):
@@ -2009,43 +2009,48 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     if (diagnostic_col in df1.columns):
         df1.rename(columns={diagnostic_col: "diagnosis"},inplace=True)
     if (True):
-        print(f"Phenotype codes to map: {values_to_match}")
-        print(f"Original in_pheno_codes: {in_pheno_codes}")
-        print("Mem after removing iids not passing QC:")
+        print(f"[process_pheno_and_exclusions] Phenotype codes to map: {values_to_match}")
+        print(f"[process_pheno_and_exclusions] Original in_pheno_codes: {in_pheno_codes}")
+        print("[process_pheno_and_exclusions] Mem after removing iids not passing QC:")
         usage()
     # Use boolean indexing to extract rows from the first file that match the values 
-    print("## Build initial Phenotype cases")
+    print("[process_pheno_and_exclusions] ## Build initial Phenotype cases")
     gc.collect()
-    print("ATC_Requested: ",ATC_Requested)
+    print("[process_pheno_and_exclusions] ATC_Requested: ",ATC_Requested)
     tmp_cases_df = pd.DataFrame()
     print("WARNING: Using multiple phenotypes at once can't handle (as of now) ATC codes other than within CHB/DBDS.")
+    # Set if dbds_run or not
+    dbds_run = True if "CHB_DBDS" == cluster_run else False
+    # Extra cols when dbds_run=True (only if they exist)
+    extra_cols_to_keep = ["type", "source", "register"] if cluster_run in ["CHB_DBDS", "IBP_DST", "IBP_computerome"] else []
+    print(f"[process_pheno_and_exclusions] cluster_run: {cluster_run}\nextra_cols_to_keep: {extra_cols_to_keep}")
     for InclusionReason in in_pheno_codes['Disorder']:
-        print("Building CaseControl list regarding ",InclusionReason)
+        extra_cols_to_keep
+        print("[process_pheno_and_exclusions] Building CaseControl list regarding ",InclusionReason)
         values_to_match = ""
         values_to_match = set(str(value) for value in in_pheno_codes.loc[in_pheno_codes['Disorder'] == InclusionReason, "Disorder Codes"].iloc[0])
-        print(f"values_to_match: {values_to_match}")
+        print(f"[process_pheno_and_exclusions] values_to_match: {values_to_match}")
         if InclusionReason == 'ATC' or ATC_Requested == "All" or ATC_Requested == "Some":
             print("INFO: Identified that you are running ATC call based on the following Name: ",InclusionReason)
             if cluster_run == "CHB_DBDS":
                 atc_df1 = pd.read_csv(atc_file, sep=fsep, engine='python', dtype=object, dayfirst=DayFirst, date_format=DateFormat, parse_dates=atc_cols_to_read_as_date)
-                print(f"atc_df1.head(5): {atc_df1.head(5)}")
+                print(f"[process_pheno_and_exclusions] atc_df1.head(5): {atc_df1.head(5)}")
                 if (qced_iids != ""):
                     if (len(qced_iids_to_keep) > 0):
-                        print(f"qced_iids_to_keep.head(5): {qced_iids_to_keep.head(5)}")
+                        print(f"[process_pheno_and_exclusions] qced_iids_to_keep.head(5): {qced_iids_to_keep.head(5)}")
                         atc_df1 = atc_df1[atc_df1[iidcol].isin(qced_iids_to_keep[iidcol])]
                 if (general_exclusions != ""):
                     if (len(iids_to_exclude) > 0):
-                        print(f"iids_to_exclude.head(5): {iids_to_exclude.head(5)}")
+                        print(f"[process_pheno_and_exclusions] iids_to_exclude.head(5): {iids_to_exclude.head(5)}")
                         atc_df1 = atc_df1[~atc_df1[iidcol].isin(iids_to_exclude[iidcol])]
-            print(f"len(atc_df1.index): {len(atc_df1.index)}")
-            print(f"atc_df1.head(5): {atc_df1.head(5)}")
-            filtered_df = build_phenotype_cases(atc_df1, exact_match, values_to_match, atc_diag_col, birthdatecol, iidcol, atc_date_col, atc_date_col, verbose, Covariates=True, Covar_Name=InclusionReason)[[iidcol, "diagnosis", "diagnoses", "in_dates", "out_dates", "first_dx", "n_diags", "n_unique_in_days"]]
-            print("Identified ",str(len(filtered_df.index))," of Cases for ",InclusionReason)
+            print(f"[process_pheno_and_exclusions] len(atc_df1.index): {len(atc_df1.index)}")
+            print(f"[process_pheno_and_exclusions] atc_df1.head(5): {atc_df1.head(5)}")
+            filtered_df = build_phenotype_cases(atc_df1, exact_match, values_to_match, atc_diag_col, birthdatecol, iidcol, atc_date_col, atc_date_col, verbose, Covariates=True, Covar_Name=InclusionReason)[[iidcol, "diagnosis", "diagnoses", "in_dates", "out_dates", "first_dx", "n_diags", "n_unique_in_days"] + extra_cols_to_keep ]
             del atc_df1
         else:
-            filtered_df = build_phenotype_cases(df1, exact_match, values_to_match, diagnostic_col, birthdatecol, iidcol, input_date_in_name, input_date_out_name, verbose, Covariates=True, Covar_Name=InclusionReason)[[iidcol, "diagnosis", "diagnoses", "in_dates", "out_dates", "first_dx", "n_diags", "n_unique_in_days"]]
-            print("Identified ",str(len(filtered_df.index))," of Cases for ",InclusionReason)
-        print(f"filtered_df.columns: {filtered_df.columns}")
+            filtered_df = build_phenotype_cases(df1, exact_match, values_to_match, diagnostic_col, birthdatecol, iidcol, input_date_in_name, input_date_out_name, verbose, Covariates=True, Covar_Name=InclusionReason)[[iidcol, "diagnosis", "diagnoses", "in_dates", "out_dates", "first_dx", "n_diags", "n_unique_in_days"] + extra_cols_to_keep ]
+        print("[process_pheno_and_exclusions] Identified ",str(len(filtered_df.index))," of Cases for ",InclusionReason)
+        print(f"[process_pheno_and_exclusions] filtered_df.columns: {filtered_df.columns}")
         if not filtered_df.empty:
             if tmp_cases_df.empty:
                 tmp_cases_df = filtered_df
@@ -2056,6 +2061,9 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                 tmp_cases_df[InclusionReason+'_earliest_date'] = tmp_cases_df["first_dx"].copy()
                 tmp_cases_df[InclusionReason+'_n_diags'] = tmp_cases_df["n_diags"].copy()
                 tmp_cases_df[InclusionReason+'_n_unique_in_days'] = tmp_cases_df["n_unique_in_days"].copy()
+                for col in extra_cols_to_keep:
+                    if col in tmp_cases_df.columns:
+                        tmp_cases_df[InclusionReason+'_'+col] = tmp_cases_df[col].copy()
             else:
                 filtered_df.rename(columns={"diagnoses":InclusionReason+"_Codes"},inplace=True)
                 filtered_df.rename(columns={"in_dates":InclusionReason+"_In_Dates"},inplace=True)
@@ -2065,6 +2073,9 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                 filtered_df.rename(columns={"n_unique_in_days":InclusionReason+'_n_unique_in_days'},inplace=True)
                 filtered_df.rename(columns={"diagnosis":InclusionReason},inplace=True)
                 tmp_cases_df = tmp_cases_df.merge(filtered_df, on=iidcol, how='outer')
+                for col in extra_cols_to_keep:
+                    if col in tmp_cases_df.columns:
+                        filtered_df.rename(columns={col:InclusionReason+'_'+col},inplace=True)
             tmp_cases_df[InclusionReason] = tmp_cases_df[InclusionReason].fillna("")
             tmp_cases_df[InclusionReason+"_In_Dates"] = tmp_cases_df[InclusionReason+"_In_Dates"].fillna("")
             tmp_cases_df[InclusionReason+"_Out_Dates"] = tmp_cases_df[InclusionReason+"_Out_Dates"].fillna("")
@@ -2075,6 +2086,8 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
             tmp_cases_df[InclusionReason+'_earliest_date'] = ""
             tmp_cases_df[InclusionReason+'_n_diags'] = ""
             tmp_cases_df[InclusionReason+'_n_unique_in_days'] = ""
+            for col in extra_cols_to_keep:
+                tmp_cases_df[InclusionReason+'_'+col] = ""
         del filtered_df
     if (qced_iids != ""):
         del qced_iids_to_keep
@@ -2106,7 +2119,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         df1.rename(columns={input_date_in_name: "date_in"}, inplace=True)
         input_date_in_name = "date_in"
     if not use_predefined_exdep_exclusions and lifetime_exclusions_file == "" and post_exclusions_file == "" and oneYearPrior_exclusions_file == "":
-        del df1
+        #del df1
         if (verbose):
             print("Mem after building tmp_cases_df and tmp_controls_df; AND deleting df1:")
             usage()
@@ -2128,60 +2141,60 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                                                   ICDCM=ICDCM, skip_icd_update=skip_icd_update, exact_match=exact_match, remove_point_in_diag_request=remove_point_in_diag_request)
             assert isinstance(post_exclusions.iloc[0]["Disorder Codes"], list)
             del(notneeded)
-    # Set if dbds_run or not
-    dbds_run = True if "CHB_DBDS" == cluster_run else False
+    
     # Append CaseControl Dataframe with information regarding the ExDEP exclusions
     if (not lifetime_exclusions.empty):
         for ExclusionReason in lifetime_exclusions['Disorder']:
-            print("Building ExDEP exclusions regarding the LIFETIME exclusion ",ExclusionReason)
+            print("[process_pheno_and_exclusions] Building ExDEP exclusions regarding the LIFETIME exclusion ",ExclusionReason)
             values_to_match = ""
             values_to_match = set(str(value) for value in lifetime_exclusions.loc[lifetime_exclusions['Disorder'] == ExclusionReason, "Disorder Codes"].iloc[0])
             casecontrol_df = build_ExDEP_exclusions(casecontrol_df, df1, diagnostic_col, iidcol, birthdatecol, input_date_in_name, input_date_out_name, values_to_match, ExclusionReason, 
-                                                    exact_match, verbose, get_earliest_date_from_data=True, dbds_run=dbds_run)
+                                                    exact_match, verbose, get_earliest_date_from_data=True, dbds_run=dbds_run, extra_cols_to_keep=extra_cols_to_keep)
             #print(f"Description of {ExclusionReason}: {casecontrol_df[ExclusionReason].value_counts()}; {casecontrol_df[ExclusionReason].head(5)}")
     if (not oneYearPrior_exclusions.empty):
         for ExclusionReason in oneYearPrior_exclusions['Disorder']:
-            print("Building ExDEP exclusions regarding the 1Y PRIOR exclusion ",ExclusionReason)
+            print("[process_pheno_and_exclusions] Building exclusions regarding the 1Y PRIOR exclusion ",ExclusionReason)
             values_to_match = ""
             values_to_match = set(str(value) for value in oneYearPrior_exclusions.loc[oneYearPrior_exclusions['Disorder'] == ExclusionReason, "Disorder Codes"].iloc[0])
             casecontrol_df = build_ExDEP_exclusions(casecontrol_df, df1, diagnostic_col, iidcol, birthdatecol, input_date_in_name, input_date_out_name, values_to_match, ExclusionReason, 
-                                                    exact_match, verbose, get_earliest_date_from_data=True, dbds_run=dbds_run)
+                                                    exact_match, verbose, get_earliest_date_from_data=True, dbds_run=dbds_run, extra_cols_to_keep=extra_cols_to_keep)
             #print(f"Description of {ExclusionReason}: {casecontrol_df[ExclusionReason].value_counts()}; {casecontrol_df[ExclusionReason].head(5)}")
     if (not post_exclusions.empty):
         for ExclusionReason in post_exclusions['Disorder']:
-            print("Building ExDEP exclusions regarding the POST exclusion ",ExclusionReason)
+            print("[process_pheno_and_exclusions] Building exclusions regarding the POST exclusion ",ExclusionReason)
             values_to_match = ""
             values_to_match = set(str(value) for value in post_exclusions.loc[post_exclusions['Disorder'] == ExclusionReason, "Disorder Codes"].iloc[0])
             casecontrol_df = build_ExDEP_exclusions(casecontrol_df, df1, diagnostic_col, iidcol, birthdatecol, input_date_in_name, input_date_out_name, values_to_match, ExclusionReason, 
-                                                    exact_match, verbose, get_earliest_date_from_data=True, dbds_run=dbds_run)
+                                                    exact_match, verbose, get_earliest_date_from_data=True, dbds_run=dbds_run, extra_cols_to_keep=extra_cols_to_keep)
             #print(f"Description of {ExclusionReason}: {casecontrol_df[ExclusionReason].value_counts()}; {casecontrol_df[ExclusionReason].head(5)}")
     if (not covariates.empty):
         for ExclusionReason in covariates['Disorder']:
-            print("Building Cases regarding the Covariates ",ExclusionReason)
+            print("[process_pheno_and_exclusions] Building Cases regarding the Covariates ",ExclusionReason)
             values_to_match = ""
             values_to_match = set(str(value) for value in covariates.loc[covariates['Disorder'] == ExclusionReason, "Disorder Codes"].iloc[0])
             casecontrol_df = build_ExDEP_exclusions(casecontrol_df, df1, diagnostic_col, iidcol, birthdatecol, input_date_in_name, input_date_out_name, values_to_match, ExclusionReason, 
-                                                    exact_match, verbose, get_earliest_date_from_data=True, dbds_run=dbds_run)
+                                                    exact_match, verbose, get_earliest_date_from_data=True, dbds_run=dbds_run, extra_cols_to_keep=extra_cols_to_keep)
             #print(f"Description of {ExclusionReason}: {casecontrol_df[ExclusionReason].value_counts()}; {casecontrol_df[ExclusionReason].head(5)}")
-        del df1
-        if (verbose):
-            print ("Mem after building all ExDEP exclusions and deleteing df1.")
-            usage()
-        gc.collect()
+    del df1
+    if (verbose):
+        print ("[process_pheno_and_exclusions] Mem after building all ExDEP exclusions and deleteing df1.")
+        usage()
+    gc.collect()
     
     if (verbose):
-        print ("Mem after building Lifetime exclusions and deleteing df1.")
+        print ("[process_pheno_and_exclusions] Mem after building potential Exclusions and Covariates and deleteing df1.")
         usage()
         print(casecontrol_df.head(5))
         print(df3.head(5))
     # Add information from stam_file and keep also IIDs that are not given in df1 (lpr_file).
     if casecontrol_df.empty:
-        print("casecontrol_df is empty")
+        print("[process_pheno_and_exclusions] casecontrol_df is empty")
         casecontrol_df = pd.DataFrame(columns=[iidcol,"diagnosis","diagnoses","in_dates","out_dates","first_dx","n_diags","n_unique_in_days"])
         result_df = pd.merge(casecontrol_df, df3, on=iidcol, how='outer')
         result_df["diagnosis"] = "Control"
     else:
         result_df = pd.merge(casecontrol_df, df3, on=iidcol, how='outer')
+        print(f"[process_pheno_and_exclusions] casecontrol_df.columns: {casecontrol_df.columns}\nresult_df.columns {result_df.columns}")
     if (verbose):
         print(result_df.head(5))
     result_df.loc[(result_df["diagnosis"] != "Case") & 
@@ -2190,22 +2203,22 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     if (not("birthdate" in result_df.columns) and (birthdatecol in result_df.columns)):
         result_df.rename(columns={birthdatecol:"birthdate"}, inplace=True)
         if (verbose):
-            print("Updating colname of result_df from "+birthdatecol+" to birthdate")
+            print("[process_pheno_and_exclusions] Updating colname of result_df from "+birthdatecol+" to birthdate")
     if ("birthdate_x" in result_df.columns):
         if (verbose):
-            print("Updating colname of result_df from birthdate_x to birthdate")
+            print("[process_pheno_and_exclusions] Updating colname of result_df from birthdate_x to birthdate")
         result_df.rename(columns={"birthdate_x":"birthdate"}, inplace=True)
     if (not("birthdate" in result_df.columns) and (birthdatecol+"_x" in result_df.columns)):
         result_df.rename(columns={birthdatecol+"_x":"birthdate"}, inplace=True)
         if (verbose):
-            print("Updating colname of result_df from "+birthdatecol+"_x to birthdate")
+            print("[process_pheno_and_exclusions] Updating colname of result_df from "+birthdatecol+"_x to birthdate")
     if (not("birthdate" in result_df.columns) and (birthdatecol in result_df.columns)):
         result_df.rename(columns={birthdatecol:"birthdate"}, inplace=True)
         if (verbose):
-            print("Updating colname of result_df from "+birthdatecol+" to birthdate")
+            print("[process_pheno_and_exclusions] Updating colname of result_df from "+birthdatecol+" to birthdate")
     del df3
     if (verbose):
-        print("Mem after deleting df3, updating tmp_controls_df, building dx_result_df, casecontrol_df and result_df:")
+        print("[process_pheno_and_exclusions] Mem after deleting df3, updating tmp_controls_df, building dx_result_df, casecontrol_df and result_df:")
         usage()
     gc.collect()
     if (verbose):
@@ -2234,19 +2247,19 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     result_df['temp_first_dx'] = result_df['first_dx'].copy()
     result_df['Age_FirstDx'] = 0
     if (verbose):
-        print(result_df.head(5))
-        print(result_df['diagnosis'].unique())  # Check unique values in 'diagnosis' column
-        print(result_df.dtypes)  # Check data types of columns
-        print(result_df[["diagnosis", "temp_first_dx", "temp_birthdate"]].head())
-        print(result_df["temp_birthdate"].head())
+        print("[process_pheno_and_exclusions] ",result_df.head(5))
+        print("[process_pheno_and_exclusions] ",result_df['diagnosis'].unique())  # Check unique values in 'diagnosis' column
+        print("[process_pheno_and_exclusions] ",result_df.dtypes)  # Check data types of columns
+        print("[process_pheno_and_exclusions] ",result_df[["diagnosis", "temp_first_dx", "temp_birthdate"]].head())
+        print("[process_pheno_and_exclusions] ",result_df["temp_birthdate"].head())
     # Calculate age for 'Case' rows
     case_indices = np.where(result_df['diagnosis'] == 'Case')[0]
     case_rows = result_df.iloc[case_indices]
     # Identify case rows
-    print("case_rows.head(5):",case_rows.head(5))
-    print("type(case_rows):",type(case_rows))
+    print("[process_pheno_and_exclusions] case_rows.head(5):",case_rows.head(5))
+    print("[process_pheno_and_exclusions] type(case_rows):",type(case_rows))
     print(case_rows.shape)
-    print("result_df.shape:",result_df.shape)
+    print("[process_pheno_and_exclusions] result_df.shape:",result_df.shape)
     print(result_df.loc[case_indices, 'temp_first_dx'].head(5))
     print(result_df.loc[case_indices, 'temp_birthdate'].head(5))
     print(type(result_df.loc[case_indices, 'temp_first_dx']))
@@ -2260,7 +2273,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
             # Compute age in years (approximate)
             age_first_dx = (first_dx_converted - birthdate_converted).dt.days // 365
         except Exception as e:
-            print(f"WARNING while processing date columns: {e}. Attempting to fix formats...")
+            print(f"WARNING while processing date columns: {e}. Attempting to fix formats... [process_pheno_and_exclusions]")
 
             # Convert to datetime, force errors to NaT
             result_df['temp_first_dx'] = pd.to_datetime(result_df['temp_first_dx'], errors='coerce')
@@ -2280,7 +2293,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
 
         # Assign the calculated values to the DataFrame
         result_df.loc[case_indices, 'Age_FirstDx'] = age_first_dx
-        print(result_df.loc[case_indices, ["diagnosis", "temp_first_dx", "temp_birthdate"]].head())
+        print(f"[process_pheno_and_exclusions] result_df.loc[case_indices, [\"diagnosis\", \"temp_first_dx\", \"temp_birthdate\"]].head(): {result_df.loc[case_indices, ['diagnosis', 'temp_first_dx', 'temp_birthdate']].head()}")
         result_df.drop("temp_first_dx", inplace=True, axis=1)
         result_df.drop("temp_birthdate", inplace=True, axis=1)
     if (verbose):
@@ -2288,7 +2301,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     # Create a DataFrame with unique combinations of ID and DX 
     final_df = result_df.drop_duplicates(subset=iidcol)
     if (verbose):
-        print("final_df: (",str(final_df[iidcol].nunique()),"rows) - ",final_df.columns)
+        print("[process_pheno_and_exclusions] final_df: (",str(final_df[iidcol].nunique()),"rows) - ",final_df.columns)
     del result_df
     if (sexcol != "sex" and sexcol in final_df.columns and not "sex" in final_df.columns ):
         # Rename sex column 
@@ -2297,7 +2310,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         #drop the duplicated column
         final_df.drop(sexcol, inplace=True, axis=1)
     if (verbose):
-        print("Mem after deleting result_df:")
+        print("[process_pheno_and_exclusions] Mem after deleting result_df:")
         usage()
     else:
         gc.collect()
@@ -2308,15 +2321,15 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         print(f"df4 cols: ",df4.columns)
         try:
             if(len(df4[iidcol]) > df4[iidcol].nunique()):
-                print("Warning: df4 contains duplicated iids.")
+                print("Warning: df4 contains duplicated iids.[process_pheno_and_exclusions] ")
             # Add the person information
             final_df =  pd.merge(final_df, df4, on=iidcol, how='left')
             if (verbose):
-                print("Merged df4 (",addition_information_file,") to final_df (",str(final_df[iidcol].nunique())," rows)")
-                print("Mem after merging with df4 and deleting df4 (right before saving output file):")
+                print("[process_pheno_and_exclusions] Merged df4 (",addition_information_file,") to final_df (",str(final_df[iidcol].nunique())," rows)")
+                print("[process_pheno_and_exclusions] Mem after merging with df4 and deleting df4 (right before saving output file):")
                 usage()
         except Exception as e:
-            print(f"Error in df4 processing: {e}")
+            print(f"[process_pheno_and_exclusions] Error in df4 processing: {e}")
         del df4
 
     cols_to_use = [iidcol,'diagnosis','diagnoses','first_dx','in_dates','birthdate','Age_FirstDx']
@@ -2336,13 +2349,14 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                     set(cols_to_use + [ExclusionReason,ExclusionReason+"_In_Dates",ExclusionReason+"_Out_Dates"])
                 )
     tmp_final_df = final_df[cols_to_use].copy()
-    final_df = final_df.merge(Exclusion_interpreter(data=tmp_final_df[tmp_final_df["diagnosis"] == "Case"].copy(), min_Age=min_Age, max_Age=max_Age, lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions, post_exclusions=post_exclusions, verbose=verbose), on=iidcol, how='left')
+    if (not lifetime_exclusions.empty or not oneYearPrior_exclusions.empty or not post_exclusions.empty):
+        final_df = final_df.merge(Exclusion_interpreter(data=tmp_final_df[tmp_final_df["diagnosis"] == "Case"].copy(), min_Age=min_Age, max_Age=max_Age, lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions, post_exclusions=post_exclusions, verbose=verbose), on=iidcol, how='left')
     del(tmp_final_df)
     
     if (lifetime_exclusions_file != "" or oneYearPrior_exclusions_file != "" or post_exclusions_file != "" or not lifetime_exclusions.empty or not oneYearPrior_exclusions.empty or not post_exclusions.empty):
-        print("Interpreting the exclusions.")
+        print("[process_pheno_and_exclusions] Interpreting the exclusions.")
         if (verbose):
-            print("final_df: (",str(final_df[iidcol].nunique())," rows) - ",final_df.columns)
+            print("[process_pheno_and_exclusions] final_df: (",str(final_df[iidcol].nunique())," rows) - ",final_df.columns)
         final_df.fillna('', inplace=True)
         final_df.replace(np.nan, '') 
         disorder_sources = [oneYearPrior_exclusions, post_exclusions, covariates, lifetime_exclusions]
@@ -2362,7 +2376,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         final_df.loc[(final_df["diagnosis"] == "Case"),"Level3_CaseControl_AgeExclusions"] = "Case_Excluded"
         if (verbose):
             print(final_df.head(5))
-            print(final_df[[iidcol,'diagnosis','diagnoses','Level3_CaseControl','date_Level2_modifier']].head(10))
+            print("[process_pheno_and_exclusions] ",final_df[[iidcol,'diagnosis','diagnoses','Level3_CaseControl','date_Level2_modifier']].head(10))
         # Check types
         print(final_df["Level3_CaseControl"].dtypes)
         print(final_df["Level2_AgeExclusion"].dtypes)
@@ -2575,6 +2589,7 @@ def build_ExDEP_exclusions(
     get_earliest_date_from_data: bool,   # kept for API compatibility (unused here)
     dbds_run: bool = False,
     update_diag_col_name_to_diag: bool = False,   # kept for API compatibility (unused here)
+    extra_cols_to_keep: list = [],
 ) -> pd.DataFrame:
     """
     Build exclusions for a given disorder `diag` and merge into `casecontrol_df`.
@@ -2585,7 +2600,7 @@ def build_ExDEP_exclusions(
       - 'in_dates'
       - 'out_dates'
       - 'first_dx'
-    and (for dbds_run=True) possibly: 'type', 'source', 'register'.
+    and (for dbds_run=True): 'type', 'source', 'register'.
 
     Returns updated casecontrol_df with added columns:
       diag, diag+'_In_Dates', diag+'_Out_Dates', diag+'_earliest_date'
@@ -2595,6 +2610,7 @@ def build_ExDEP_exclusions(
     def _select_existing(df: pd.DataFrame, wanted: Sequence[str]) -> pd.DataFrame:
         # preserve original order; ignore missing columns
         cols = df.columns.intersection(wanted)
+        print(f"[_select_existing] cols:{cols}")
         return df.loc[:, cols]
 
     # Build phenotype frame once
@@ -2606,18 +2622,19 @@ def build_ExDEP_exclusions(
         verbose, Covariates=True, Covar_Name=diag
     )
 
+    print(f"[build_ExDEP_exclusions] filtered_df.columns: {filtered_df.columns}\n filtered_df.head(5): {filtered_df.head(5)}")
     if verbose:
         print(f"[build_ExDEP_exclusions] filtered_df columns -> {list(filtered_df.columns)}")
 
     # Columns we need in all cases
     base_cols = [iidcol, "diagnoses", "in_dates", "out_dates", "first_dx"]
 
-    # Extra cols when dbds_run=True (only if they exist)
-    dbds_extra = ["type", "source", "register"] if dbds_run else []
+    print(f"[build_ExDEP_exclusions] _select_existing(filtered_df, {base_cols + extra_cols_to_keep}; base_cols {base_cols} + extra_cols_to_keep {extra_cols_to_keep})")
 
     # Keep only what exists (and in a stable order)
-    filtered_df = _select_existing(filtered_df, base_cols + dbds_extra)
-
+    filtered_df = _select_existing(filtered_df, base_cols + extra_cols_to_keep)
+    print(f"[build_ExDEP_exclusions] After [_select_existing] filtered_df.columns: {filtered_df.columns}\n filtered_df.head(5): {filtered_df.head(5)}")
+    
     if verbose:
         print(f"[build_ExDEP_exclusions] filtered_df.head(5):\n{filtered_df.head(5)}")
         print(f"[build_ExDEP_exclusions] Identified {filtered_df.shape[0]} rows for {diag}")
@@ -2647,7 +2664,9 @@ def build_ExDEP_exclusions(
             "first_dx": f"{diag}_earliest_date",
         }
         filtered_df = filtered_df.rename(columns=rename_map)
-
+        for col in extra_cols_to_keep:
+            if col in filtered_df.columns:
+                filtered_df.rename(columns={col:f"{diag}_{col}"},inplace=True)
         # Merge onto casecontrol_df
         casecontrol_df = casecontrol_df.merge(filtered_df, on=iidcol, how="outer")
 
@@ -2655,12 +2674,18 @@ def build_ExDEP_exclusions(
         for col in [diag, f"{diag}_In_Dates", f"{diag}_Out_Dates"]:
             if col in casecontrol_df.columns:
                 casecontrol_df[col] = casecontrol_df[col].where(casecontrol_df[col].notna(), "")
+        print(f"[build_ExDEP_exclusions] [if not filtered_df.empty] filtered_df.columns: {filtered_df.columns}\ncasecontrol_df.columns: {casecontrol_df.columns}")
     else:
         # Ensure the expected columns exist with empty defaults
         for col in [diag, f"{diag}_In_Dates", f"{diag}_Out_Dates", f"{diag}_earliest_date"]:
             if col not in casecontrol_df.columns:
                 casecontrol_df[col] = "" if col != f"{diag}_earliest_date" else pd.NaT
-
+        for col in extra_cols_to_keep:
+            col=f"{diag}_{col}"
+            if col not in casecontrol_df.columns:
+                casecontrol_df[col] = "" if col != f"{diag}_earliest_date" else pd.NaT
+        print(f"[build_ExDEP_exclusions] [if filtered_df.empty] filtered_df.columns: {filtered_df.columns}\ncasecontrol_df.columns: {casecontrol_df.columns}")
+    
     return casecontrol_df
 
 def merge_IIDs(
@@ -2702,6 +2727,9 @@ def merge_IIDs(
         cols.append("type")
     if "source" in tmp_result_df.columns:
         cols.append("source")
+    if "register" in tmp_result_df.columns:
+        cols.append("register")
+    print(f"[merge_IIDs] cols to keep:{cols}")
     cols = [c for c in cols if c in tmp_result_df.columns]
     tmp_result_df = tmp_result_df[cols].copy()
 
@@ -2709,11 +2737,11 @@ def merge_IIDs(
     def _normalize_dates(df: pd.DataFrame) -> pd.DataFrame:
         # Clean up suffixes from merges
         if "date_in_y" in df.columns:
-            print("WARNING: dropping date_in_y (merge_IIDs)")
+            print("WARNING: dropping date_in_y [merge_IIDs] ")
             df = df.drop(columns=["date_in_y"])
         if "date_in_x" in df.columns:
             if "date_in" not in df.columns:
-                print("WARNING: renaming date_in_x→date_in (merge_IIDs)")
+                print("WARNING: renaming date_in_x→date_in [merge_IIDs] ")
                 df["date_in"] = df["date_in_x"]
             df = df.drop(columns=["date_in_x"])
         # Ensure we have date_in
@@ -2758,7 +2786,11 @@ def merge_IIDs(
         sources = grouped["source"].apply(list).reset_index()
         merges.append(sources)
     if "type" in tmp_result_df.columns:
-        types = grouped["type"].apply(list).rename("c_diagtype").reset_index()
+        #types = grouped["type"].apply(list).rename("c_diagtype").reset_index()
+        types = grouped["type"].apply(list).reset_index()
+        merges.append(types)
+    if "register" in tmp_result_df.columns:
+        types = grouped["register"].apply(list).reset_index()
         merges.append(types)
 
     if Cases:
@@ -2770,7 +2802,7 @@ def merge_IIDs(
     id_dx_date_df = merges[0]
     for m in merges[1:]:
         id_dx_date_df = id_dx_date_df.merge(m, on=iidcol, how="outer")
-
+    print(f"[merge_IIDs] id_dx_date_df.head(5): {id_dx_date_df.head(5)}/n id_dx_date_df.columns: {id_dx_date_df.columns}")
     # --- Step 5: Add Case/Control flag
     tmp_result_df = tmp_result_df[[iidcol]].drop_duplicates()
     tmp_result_df["diagnosis"] = "Case" if Cases else "Control"
@@ -2783,7 +2815,7 @@ def merge_IIDs(
 
     # --- Step 6: Optionally merge entry/exit
     if BuildEntryExitDates:
-        print("WARNING: BuildEntryExitDates not fully implemented here.")
+        print("WARNING: BuildEntryExitDates not fully implemented here [merge_IIDs]")
         # dx_result_df = dx_result_df.merge(Entry_Exit_date_df, on=iidcol)
 
     return dx_result_df
@@ -2824,8 +2856,9 @@ def build_phenotype_cases(
     Returns:
         DataFrame with phenotype cases or covariates.
     """
-    def map_cases(values_to_match, exact_match, df1, diagcol):
+    def map_cases(values_to_match, exact_match, df1, diagcol, cols=None):
         exact_set, prefixes = set(), []
+        out = pd.DataFrame()
         if values_to_match is not None:
             for d in map(str, values_to_match):
                 d = d.strip()
@@ -2846,21 +2879,26 @@ def build_phenotype_cases(
                 if prefixes:
                     dmask |= s.str.startswith(tuple(prefixes), na=False)
                 diag_mask = dmask
-            return diag_mask
-        print(f"ERROR: No values_to_match supplied: {values_to_match}")
+            if diag_mask.any():
+                out = (df1.loc[diag_mask, cols if cols is not None else df1.columns])
+            return out
+        print(f"ERROR: No values_to_match supplied: {values_to_match} [build_phenotype_cases]")
 
     # --- Step 1: Build tmp_result_df ---
     if isinstance(df1, list):
         # Expect 2 dfs, 2 values_to_match, 2 diagnostic cols, 2 date cols
         if not (isinstance(values_to_match, list) and isinstance(diagnostic_col, list) and isinstance(input_date_in_name, list)):
-            raise ValueError("When df1 is a list, you must supply values_to_match, diagnostic_col, and input_date_in_name as lists.")
+            raise ValueError("[build_phenotype_cases] When df1 is a list, you must supply values_to_match, diagnostic_col, and input_date_in_name as lists.")
         df_noatc, df_atc = df1
         vals_noatc, vals_atc = values_to_match
         diag_noatc, diag_atc = diagnostic_col
         date_noatc, date_atc = input_date_in_name
-
-        tmp_result_df = map_cases(vals_noatc, exact_match, df_noatc, diag_noatc)
-        tmp_result_df_atc = map_cases(vals_atc, exact_match, df_atc, diag_atc)
+        tmp_result_df = map_cases(values_to_match=vals_noatc, 
+                                  exact_match=exact_match, df1=df_noatc, 
+                                  diagcol=diag_noatc)
+        tmp_result_df_atc = map_cases(values_to_match=vals_atc, 
+                                      exact_match=exact_match, df1=df_atc, 
+                                      diagcol=diag_atc)
         # if exact_match:
         #     tmp_result_df = df_noatc[df_noatc[diag_noatc].isin(vals_noatc)].copy()
         #     tmp_result_df_atc = df_atc[df_atc[diag_atc].isin(vals_atc)].copy()
@@ -2876,7 +2914,10 @@ def build_phenotype_cases(
 
     else:
         # Single df
-        tmp_result_df = map_cases(values_to_match, exact_match, df1, diagcol)
+        tmp_result_df = map_cases(values_to_match=values_to_match, 
+                                  exact_match=exact_match, 
+                                  df1=df1, 
+                                  diagcol=diagnostic_col)
         # if exact_match:
         #     tmp_result_df = df1[df1[diagnostic_col].isin(values_to_match)].copy()
         # else:
@@ -2889,15 +2930,18 @@ def build_phenotype_cases(
 
     if verbose:
         print(f"[build_phenotype_cases] columns: {list(tmp_result_df.columns)}")
-        print(f"Using {input_date_in_name}, {iidcol}, {diagnostic_col}")
-
+        print(f"[build_phenotype_cases] Using {input_date_in_name}, {iidcol}, {diagnostic_col}")
+    print(f"[build_phenotype_cases] tmp_result_df.head(5): {tmp_result_df.head(5)}")
+    print(f"[build_phenotype_cases] tmp_result_df.columns: {tmp_result_df.columns}")
+    print(f"[build_phenotype_cases] Covariates: {Covariates}")
     # --- Step 2: Sanity checks ---
-    if tmp_result_df[iidcol].nunique() == 0 and not Covariates:
-        print("Error: No cases found.")
+    if tmp_result_df.empty:
+        if not Covariates:
+            print("Error: No cases found [build_phenotype_cases]")
         return pd.DataFrame()
 
     if not Covariates:
-        print(f"Identified {tmp_result_df[iidcol].nunique()} IIDs with overlapping diagnostic code(s).")
+        print(f"[build_phenotype_cases] Identified {tmp_result_df[iidcol].nunique()} IIDs with overlapping diagnostic code(s).")
 
     # --- Step 3: Convert date columns ---
     def _convert_series(s):
@@ -2920,10 +2964,12 @@ def build_phenotype_cases(
         Covariates=Covariates,
         BuildEntryExitDates=BuildEntryExitDates,
     )
-
+    print(f"[build_phenotype_cases] merged.head(5): {merged.head(5)}\n merged.columns: {merged.columns:}")
     if not Covariates:
+        print(f"[build_phenotype_cases] Returning merged dataframe as it is for the MAIN PHENOTYPE and not a COVARIATE.")
         return merged
-
+    else:
+        print(f"[build_phenotype_cases] Working on COVARIATE formatting.")
     # --- Step 5: Covariates-specific cleanup ---
     # Keep only iidcol + core columns
     keep_cols = {
@@ -2932,23 +2978,30 @@ def build_phenotype_cases(
     }
     if "type" in merged.columns:
         keep_cols.add("type")
-
-    covar = merged.drop(columns=[c for c in merged.columns if c not in keep_cols])
+    if "source" in merged.columns:
+        keep_cols.add("source")
+    if "register" in merged.columns:
+        keep_cols.add("register")
+    print(f"[build_phenotype_cases] keep_cols: {keep_cols}")
+    covar = merged.drop(columns=[c for c in merged.columns if c not in keep_cols]).copy()
+    print(f"[build_phenotype_cases] covar.columns: {covar.columns}")
 
     if verbose:
-        print(f"Covariates DF for {Covar_Name} has columns: {list(covar.columns)}")
-        print(f"Duplicated IIDs? {covar[iidcol].duplicated().any()}")
+        print(f"[build_phenotype_cases] Covariates DF for {Covar_Name} has columns: {list(covar.columns)}")
+        print(f"[build_phenotype_cases] Duplicated IIDs? {covar[iidcol].duplicated().any()}")
 
     covar = covar.drop_duplicates(subset=[iidcol])
 
     if not general_results.empty:
         if verbose:
-            print("Merging with general_results...")
+            print("[build_phenotype_cases] Merging with general_results...")
         covar = pd.merge(general_results, covar, on=iidcol)
         covar = covar.drop_duplicates(subset=[iidcol])
 
     if verbose:
-        print(f"Identified {covar.shape[0]} {Covar_Name} Covariate cases.")
+        print(f"[build_phenotype_cases] Identified {covar.shape[0]} {Covar_Name} Covariate cases.")
+    
+    print(f"[build_phenotype_cases] covar.columns: {covar.columns}")
 
     return covar
 
@@ -3276,7 +3329,22 @@ def finalize_lpr_data(df1, diagnostic_col, birthdatecol, verbose):
         df1.rename(columns={birthdatecol: "birthdate"}, inplace=True)
         if verbose:
             print("Updated birthdatecol name to 'birthdate'.")
-    
+
+    if "c_diagtype" in df1.columns:
+        df1.rename(columns={"c_diagtype": "type"}, inplace=True)
+        if verbose:
+            print("Updated c_diagtype name to 'type'.")
+
+    if "source" in df1.columns:
+        df1.rename(columns={"source": "register"}, inplace=True)
+        if verbose:
+            print("Updated source name to 'register'.")
+
+    if "diag_source" in df1.columns:
+        df1.rename(columns={"diag_source": "source"}, inplace=True)
+        if verbose:
+            print("Updated diag_source name to 'source'.")
+
     return df1
 
 def process_entry(entry, remove_leading, eM, mode, icdprefix, remove_point, ICDCM):

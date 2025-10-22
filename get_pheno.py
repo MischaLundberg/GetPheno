@@ -582,7 +582,20 @@ MDD_ATC_Jorgensen_Codes = ["ATC:N06AB","ATC:N06AX11","ATC:N06AX03","ATC:N06AX16"
 # Utilities
 # --------------------------------------------------------------------------------------
 
-
+def detect_ATC_status(df, colname="Disorder Codes"):
+                """Return 'All', 'Some', or 'None' depending on ATC code presence."""
+                if df.empty or colname not in df.columns:
+                    return "None"
+                col_values = df[colname].dropna().astype(str)
+                if len(col_values) == 0:
+                    return "None"
+                if all(v.startswith("ATC") for v in col_values):
+                    return "All"
+                elif any(v.startswith("ATC") for v in col_values):
+                    return "Some"
+                else:
+                    return "None"
+                
 def match_codes(series, codes, exact=False):
     if exact:
         return series.isin(codes)
@@ -1561,7 +1574,19 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             if not verbose:
                 print("[main] Running [dict_update_icd_coding]")
             covariates, normalized_covars = dict_update_icd_coding(covariates, exact_match, skip_icd_update, remove_point_in_diag_request, ICDCM, noLeadingICD, icdprefix)
-                
+            # Determine presence of ATC codes
+            global ATC_Requested 
+            # --- Apply to each DataFrame ---
+            ATC_Status = {
+                "lifetime_exclusions": detect_ATC_status(lifetime_exclusions),
+                "oneYearPrior_exclusions": detect_ATC_status(oneYearPrior_exclusions),
+                "post_exclusions": detect_ATC_status(post_exclusions),
+                "covariates": detect_ATC_status(covariates)
+            }
+            print
+            if ATC_Requested == "None" and ("All" in ATC_Status.values() or "Some" in ATC_Status.values()):
+                ATC_Requested = "Some"
+
         if selectIIDs != "" and os.path.exists(selectIIDs):
             # read iid file
             iids = pd.read_csv(selectIIDs, header=None)[0]
@@ -1599,6 +1624,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             pheno_requests_normalized.extend(set(map(str, normalized_covars)))
         if lifetime_exclusions.empty and oneYearPrior_exclusions.empty and post_exclusions.empty and covariates.empty:
             logger.info("[main] All posssible exclusions/covariates are empty (lifetime_exclusions,oneYearPrior_exclusions,post_exclusions,covariates)")
+        logger.info(f"[main] Identified that {ATC_Requested} of the codes are ATC codes.")
         #flattened_pheno_requests = list(sorted(set(pheno_requests))) #Keep only unique entries and sort them
         #new 01.10.2025
         flattened_pheno_requests = list(sorted(set(pheno_requests_normalized))) #Keep only unique entries and sort them
@@ -2814,7 +2840,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         if verbose:
             logger.debug("[process_pheno_and_exclusion] Mem after building tmp_cases_df and tmp_controls_df; AND deleting df1:")
             usage()
-    if (lifetime_exclusions_file != "" and  use_predefined_exdep_exclusions.empty):
+    if (lifetime_exclusions_file != "" and use_predefined_exdep_exclusions.empty):
             multi_exclusions = False
             if not verbose:
                 logger.info("[process_pheno_and_exclusions] Loading phenotypes for Lifetime exclusions.")
@@ -2822,7 +2848,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                                                   ICDCM=ICDCM, skip_icd_update=skip_icd_update, exact_match=exact_match, remove_point_in_diag_request=remove_point_in_diag_request)
             assert isinstance(lifetime_exclusions.iloc[0]["Disorder Codes"], list)
             del(notneeded)
-    if (oneYearPrior_exclusions_file != "" and  use_predefined_exdep_exclusions.empty):
+    if (oneYearPrior_exclusions_file != "" and use_predefined_exdep_exclusions.empty):
             multi_exclusions = False
             if not verbose:
                 logger.info("[process_pheno_and_exclusions] Loading phenotypes for One Year Prior exclusions.")
@@ -2830,7 +2856,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                                                   ICDCM=ICDCM, skip_icd_update=skip_icd_update, exact_match=exact_match, remove_point_in_diag_request=remove_point_in_diag_request)
             assert isinstance(oneYearPrior_exclusions.iloc[0]["Disorder Codes"], list)
             del(notneeded)
-    if (post_exclusions_file != "" and  use_predefined_exdep_exclusions.empty):
+    if (post_exclusions_file != "" and use_predefined_exdep_exclusions.empty):
             multi_exclusions = False
             if not verbose:
                 logger.info("[process_pheno_and_exclusions] Loading phenotypes for Post-Onset exclusions.")
@@ -4517,9 +4543,12 @@ def process_entry(entry, remove_leading, eM, mode, icdprefix, remove_point, ICDC
     elif entry.startswith("ATC:"):
         if only_ICD10 or only_ICD9 or only_ICD10:
             return None
+        global ATC_Requested 
+        if ATC_Requested == "None":
+            ATC_Requested = "Some"
         res = entry
         res = entry.replace("ATC:", "", 1) if remove_leading else entry
-        if mode in DK_clusters:
+        if mode in DK_clusters and remove_leading:
             res = "ATC:" + res.upper().replace('.', '')
         return res.replace('.', '') if remove_point else res
     # ICD8 processing common to several modes
@@ -4996,10 +5025,9 @@ def load_phenotypes(pheno_request, pheno_requestcol, pheno_name="NoName",
             ATC_Requested = "All"
         elif any(str(v).startswith('ATC') for v in column_values):
             ATC_Requested = "Some"
-        else:
+        elif ATC_Requested not in ["Some", "All"]:
             ATC_Requested = "None"
 
-        logger.info(f"[load_phenotypes] Identified that {ATC_Requested} codes are ATC codes.")
         logger.info(f"[load_phenotypes] in_pheno_codes before running dict_update_icd_coding: {in_pheno_codes}")
         # Update/normalize ICD coding; keeps DataFrame shape and sets 'Disorder Codes' to lists
         pheno_codes, normalized_phenos = dict_update_icd_coding(

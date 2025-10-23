@@ -582,6 +582,64 @@ MDD_ATC_Jorgensen_Codes = ["ATC:N06AB","ATC:N06AX11","ATC:N06AX03","ATC:N06AX16"
 # Utilities
 # --------------------------------------------------------------------------------------
 
+def BirthCountry_DK(x):
+    x = pd.Series(x)  # allows both scalars and Series input
+
+    conditions = [
+        (x == 0),
+        (x.between(101, 900)),
+        (x.between(901, 961)),
+        (x == 3999),
+        (x.between(2401, 2599)),
+        (x.between(4001, 4007)),
+        (x.between(4301, 4499)),
+        (x.between(4501, 4599)),
+        (x.between(4601, 4687)),
+        (x.between(4688, 4799)),
+        (x.between(4801, 4989)),
+        (x == 4998),
+        (x == 4999),
+        (x == 5001),
+        (x == 5100),
+        (x == 5101),
+        (x == 5102),
+        (x == 5103),
+        (x.between(5104, 5902)),
+        (x == 5999),
+        (x.between(7001, 9348)),
+        (x.between(9501, 9599)),
+        (x == 9999)
+    ]
+
+    choices = [
+        'Unknown',
+        'Denmark',
+        'Greenland',
+        'Greenland',
+        'Denmark',
+        'Denmark',
+        'Denmark',
+        'Denmark',
+        'Denmark',
+        'Denmark',
+        'Denmark',
+        'Denmark',
+        'Unknown',
+        'Unknown',
+        'Denmark',
+        'Greenland',
+        'Abroad',
+        'Unknown',
+        'Abroad',
+        'Abroad',
+        'Denmark',
+        'Greenland',
+        'Denmark'
+    ]
+
+    result = np.select(conditions, choices, default='Unknown')
+    return result if len(result) > 1 else result[0]
+
 def detect_ATC_status(df, colname="Disorder Codes"):
                 """Return 'All', 'Some', or 'None' depending on ATC code presence."""
                 if df.empty or colname not in df.columns:
@@ -963,6 +1021,26 @@ def _to_dt_list(x: Any) -> List[pd.Timestamp]:
     return [t for t in ts if not pd.isna(t)]
 
 def normalize_iid_series(s, target="str"):
+    """
+    Normalize an IID column that may contain strings/floats like '100.0'.
+    - target='int' -> pandas nullable Int64 (when all numeric)
+    - target='str' -> pandas StringDtype (keeps leading zeros)
+    NOTE: no longer prints to stdout; uses logger and does NOT mutate callers' data in-place.
+    """
+    s = pd.Series(s, dtype="string").str.strip().str.replace(r"\.0$", "", regex=True)
+
+    if target == "str":
+        return s
+
+    # If any non-numeric values exist, fall back to string and warn
+    if not s.str.fullmatch(r"\d+").all():
+        logger.warning("Non-numeric IIDs detected, returning string-normalized series")
+        return s
+
+    out = pd.to_numeric(s, errors="coerce")
+    return out.astype("Int64")
+
+def normalize_iid_series_old(s, target="str"):
     """
     Normalize an IID column that may contain strings/floats like '100.0'.
     target='int' -> pandas nullable Int64
@@ -1978,8 +2056,430 @@ def index_diag_file(
 
         print(f"  → wrote indexed HDF5: {h5_store}")
     print("All files indexed.")
-   
+
+# --- Retrieval function with optimized filtering order ---
+
+def select_by_iid_and_diag_old(
+    h5_path,
+    table_name,
+    iidcol,
+    iids,
+    diagcol,
+    diags,
+    *,
+    columns=None,
+    chunksize=200_000,
+    prefix_all=False,            # treat all diags as prefixes if True
+):
+    def _norm_list(x):
+        if x is None:
+            return None
+        if isinstance(x, (pd.Series, pd.Index)):
+            vals = x.tolist()
+        elif isinstance(x, np.ndarray):
+            vals = x.tolist()
+        elif not hasattr(x, "__iter__") or isinstance(x, (str, bytes)):
+            vals = [x]
+        else:
+            vals = list(x)
+        # drop Nones/NaNs and trim
+        out = []
+        for v in vals:
+            if v is None:
+                continue
+            s = str(v)
+            if s == "nan":
+                continue
+            out.append(v)
+        return out if out else None
+
+    iids_list  = _norm_list(iids)
+    diags_list = _norm_list(diags)
+
+    exact_set, prefixes = set(), []
+    if diags_list is not None:
+        for d in map(str, diags_list):
+            d = d.strip()
+            if prefix_all or d.endswith("*"):
+                prefixes.append(d[:-1] if d.endswith("*") else d)
+            else:
+                exact_set.add(d)
+    logger.info(f"[select_by_iid_and_diag] diags using prefix search: {prefixes}; diags using exact search: {exact_set}")
+    need = {iidcol, diagcol}
+    cols = None if columns is None else list(dict.fromkeys([*columns, *need]))
+
+    out = []
+    with pd.HDFStore(h5_path, "r") as store:
+        # Determine iid dtype from first chunk
+        first_chunk = None
+        for ch in store.select(table_name, columns=[iidcol], chunksize=1):
+            first_chunk = ch
+            break
+        if first_chunk is None:
+            return pd.DataFrame(columns=columns or [])
+
+        iid_dtype = first_chunk[iidcol].dtype
+
+        # Coerce iids to the H5 dtype
+        if iids_list is not None:
+            if pd.api.types.is_integer_dtype(iid_dtype) or pd.api.types.is_float_dtype(iid_dtype):
+                # numeric column: coerce iids to numeric
+                iids_norm = pd.to_numeric(pd.Series(iids_list), errors="coerce").dropna().astype(iid_dtype).tolist()
+            else:
+                # string/object column: coerce to stripped strings
+                iids_norm = pd.Series(iids_list).astype("string").str.strip().tolist()
+            iids_set = set(iids_norm)
+        else:
+            iids_set = None
+
+        # Stream chunks
+        for chunk in store.select(table_name, columns=cols, chunksize=chunksize):
+            ## normalize the iid column early
+            chunk[iidcol] = normalize_iid_series(chunk[iidcol], target="int")
+            #IID mask
+            if iids_set is None:
+                iid_mask = pd.Series(True, index=chunk.index)
+            else:
+                # cast chunk iid to same dtype used above
+                if pd.api.types.is_integer_dtype(iid_dtype) or pd.api.types.is_float_dtype(iid_dtype):
+                    iid_series = pd.to_numeric(chunk[iidcol], errors="coerce").astype(iid_dtype)
+                else:
+                    iid_series = chunk[iidcol].astype("string").str.strip()
+                iid_mask = iid_series.isin(iids_set)
+
+            # DIAG mask
+            s = chunk[diagcol].astype("string").str.strip()
+
+            if diags_list is None:
+                diag_mask = pd.Series(True, index=chunk.index)
+            else:
+                dmask = pd.Series(False, index=chunk.index)
+                if exact_set:
+                    dmask |= s.isin(exact_set)
+                if prefixes:
+                    dmask |= s.str.startswith(tuple(prefixes), na=False)
+                diag_mask = dmask
+            
+            mask = iid_mask & diag_mask
+            if mask.any():
+                out.append(chunk.loc[mask, cols if cols is not None else chunk.columns])
+
+        if out:
+            return pd.concat(out, ignore_index=True)
+
+        # empty but with real columns from store
+        st = store.get_storer(table_name)
+        fallback_cols = columns if columns is not None else [c for c in st.table.colnames if c != "index"]
+        return pd.DataFrame(columns=fallback_cols)
+    
 def select_by_iid_and_diag_optimized(
+    h5_path,
+    table_name,
+    iidcol,
+    iids,
+    diagcol,
+    diags,
+    *,
+    columns=None,
+    chunksize=200_000,
+    prefix_all=False,
+):
+    """
+    Reworked optimized reader that preserves the exact dtype / normalization
+    behaviour of select_by_iid_and_diag_old while keeping the early
+    diag-based chunk skipping optimisation.
+
+    Behavioural invariants kept from the old implementation:
+    - supplied iids are coerced to the store's iid dtype (numeric vs string)
+    - chunk[iidcol] is normalized with normalize_iid_series(..., target='int')
+      (i.e. exactly like the old function) before membership checks
+    - diags==[] or iids==[] are treated as "no filter"
+    - need columns (iidcol, diagcol) are ensured in requested columns
+    """
+    def _norm_list(x):
+        if x is None:
+            return None
+        if isinstance(x, (pd.Series, pd.Index)):
+            vals = x.tolist()
+        elif isinstance(x, np.ndarray):
+            vals = x.tolist()
+        elif not hasattr(x, "__iter__") or isinstance(x, (str, bytes)):
+            vals = [x]
+        else:
+            vals = list(x)
+        # drop Nones/NaNs and trim
+        out = []
+        for v in vals:
+            if v is None:
+                continue
+            s = str(v)
+            if s == "nan":
+                continue
+            out.append(v)
+        return out if out else None
+
+    iids_list = _norm_list(iids)
+    diags_list = _norm_list(diags)
+
+    # treat empty lists as None (no filter)
+    if iids_list == []:
+        iids_list = None
+    if diags_list == []:
+        diags_list = None
+
+    # Build diag exact/prefix sets (allow diags_list == None -> no diag filtering)
+    exact_set, prefixes = set(), []
+    if diags_list is not None:
+        for d in map(str, diags_list):
+            d = d.strip()
+            if prefix_all or d.endswith("*"):
+                prefixes.append(d[:-1] if d.endswith("*") else d)
+            else:
+                exact_set.add(d)
+
+    # Ensure required columns are always requested from the store
+    need = {iidcol, diagcol}
+    if columns is None:
+        cols = None
+    else:
+        cols = list(dict.fromkeys([*columns, *need]))
+
+    out_chunks = []
+
+    with pd.HDFStore(h5_path, "r") as store:
+        # Determine iid dtype from first chunk/sample
+        first_chunk = None
+        try:
+            for ch in store.select(table_name, columns=[iidcol], chunksize=1):
+                first_chunk = ch
+                break
+        except Exception:
+            first_chunk = None
+
+        if first_chunk is None:
+            return pd.DataFrame(columns=columns or [])
+
+        iid_dtype = first_chunk[iidcol].dtype
+
+        # capture sample dtypes from the stored table (use to coerce each chunk)
+        sample_dtypes = first_chunk.dtypes.to_dict()
+        logger.info(f"[select_by_iid_and_diag_optimized] Detected iid dtype: {iid_dtype}; sample dtypes: {sample_dtypes}")
+
+        # Coerce supplied iids to same dtype as stored column (mirror old behavior)
+        if iids_list is not None:
+            if pd.api.types.is_integer_dtype(iid_dtype) or pd.api.types.is_float_dtype(iid_dtype):
+                iids_norm = pd.to_numeric(pd.Series(iids_list), errors="coerce").dropna().astype(iid_dtype).tolist()
+            else:
+                iids_norm = pd.Series(iids_list).astype("string").str.strip().tolist()
+            iids_set = set(iids_norm)
+        else:
+            iids_set = None
+
+        # Stream chunks
+        for chunk in store.select(table_name, columns=cols, chunksize=chunksize):
+            # Attempt to apply the same dtypes observed in the sample chunk to each read chunk.
+            # This makes chunk column dtypes consistent with the indexed store and avoids
+            # # spurious NaN/NaT created by later ad-hoc coercions.
+            try:
+                cast_map = {c: sample_dtypes[c] for c in chunk.columns if c in sample_dtypes}
+                if cast_map:
+                    # use copy=False to avoid unnecessary copies; wrap in try as some casts may fail
+                    chunk = chunk.astype(cast_map, copy=False)
+            except Exception as e:
+                logger.debug(f"[select_by_iid_and_diag_optimized] dtype cast failed for chunk: {e}")
+                
+             # --- DIAG filtering first (skip early if no diag match) ---
+            if diags_list is None:
+                diag_mask = pd.Series(True, index=chunk.index)
+            else:
+                s = chunk[diagcol].astype("string").str.strip()
+                dmask = pd.Series(False, index=chunk.index)
+                if exact_set:
+                    dmask |= s.isin(exact_set)
+                if prefixes:
+                    dmask |= s.str.startswith(tuple(prefixes), na=False)
+                diag_mask = dmask
+
+            if not diag_mask.any():
+                continue
+
+            # restrict to diag-matching rows only (reduces work for IID filtering)
+            sub = chunk.loc[diag_mask].copy()
+
+            # --- IID filter: normalize exactly as old implementation did (mutate sub column)
+            if iidcol in sub.columns:
+                try:
+                    # same call as in the old function (keeps same fallback behaviour)
+                    sub[iidcol] = normalize_iid_series(sub[iidcol], target="int")
+                except Exception:
+                    # fallback: coerce to string and strip
+                    sub[iidcol] = sub[iidcol].astype("string").str.strip()
+
+            if iids_set is None:
+                iid_mask = pd.Series(True, index=sub.index)
+            else:
+                # cast chunk iid to same dtype used above for iids_set
+                if pd.api.types.is_integer_dtype(iid_dtype) or pd.api.types.is_float_dtype(iid_dtype):
+                    iid_series = pd.to_numeric(sub[iidcol], errors="coerce").astype(iid_dtype)
+                else:
+                    iid_series = sub[iidcol].astype("string").str.strip()
+                iid_mask = iid_series.isin(iids_set)
+
+            if iid_mask.any():
+                out_chunks.append(sub.loc[iid_mask, cols if cols is not None else sub.columns])
+
+    if out_chunks:
+        return pd.concat(out_chunks, ignore_index=True)
+
+    # fallback: empty but with correct columns
+    with pd.HDFStore(h5_path, "r") as store:
+        st = store.get_storer(table_name)
+        fallback_cols = columns if columns is not None else [c for c in st.table.colnames if c != "index"]
+        return pd.DataFrame(columns=fallback_cols)
+
+def select_by_iid_and_diag_optimized_working(
+    h5_path,
+    table_name,
+    iidcol,
+    iids,
+    diagcol,
+    diags,
+    *,
+    columns=None,
+    chunksize=200_000,
+    prefix_all=False,
+):
+    """
+    Optimized retrieval that mirrors the behavior of select_by_iid_and_diag_old
+    but keeps the chunk-by-chunk streaming / early diag-filtering approach.
+
+    Key differences from the earlier broken version:
+     - Coerces supplied iids to the same dtype as the stored iid column (numeric vs string)
+       (matches select_by_iid_and_diag_old).
+     - Normalizes the chunk iid column early (normalize_iid_series(..., target="int"))
+       so membership checks behave identically to the old implementation.
+     - Accepts diags=None as "no diag filter" (same as old).
+    """
+    def _norm_list(x):
+        if x is None:
+            return None
+        if isinstance(x, (pd.Series, pd.Index)):
+            vals = x.tolist()
+        elif isinstance(x, np.ndarray):
+            vals = x.tolist()
+        elif not hasattr(x, "__iter__") or isinstance(x, (str, bytes)):
+            vals = [x]
+        else:
+            vals = list(x)
+        # drop Nones/NaNs and trim (keep same semantics as the old impl)
+        out = []
+        for v in vals:
+            if v is None:
+                continue
+            s = str(v)
+            if s == "nan":
+                continue
+            out.append(v)
+        return out if out else None
+
+    iids_list = _norm_list(iids)
+    diags_list = _norm_list(diags)
+
+    # Build diag exact/prefix sets (allow diags_list == None -> no diag filtering)
+    exact_set, prefixes = set(), []
+    if diags_list is not None:
+        for d in map(str, diags_list):
+            d = d.strip()
+            if prefix_all or d.endswith("*"):
+                prefixes.append(d[:-1] if d.endswith("*") else d)
+            else:
+                exact_set.add(d)
+
+    need = {iidcol, diagcol}
+    cols = None if columns is None else list(dict.fromkeys([*columns, *need]))
+    out = []
+    need = {iidcol, diagcol}
+
+    with pd.HDFStore(h5_path, "r") as store:
+        # Determine iid dtype from first chunk (kept for logging/awareness)
+        first_chunk = None
+        try:
+            for ch in store.select(table_name, columns=[iidcol], chunksize=1):
+                first_chunk = ch
+                break
+        except Exception:
+            first_chunk = None
+
+        if first_chunk is None:
+            # nothing in store
+            return pd.DataFrame(columns=columns or [])
+
+        iid_dtype = first_chunk[iidcol].dtype
+
+        # Coerce iids to the H5 dtype (mirror old behaviour)
+        if iids_list is not None:
+            if pd.api.types.is_integer_dtype(iid_dtype) or pd.api.types.is_float_dtype(iid_dtype):
+                iids_norm = pd.to_numeric(pd.Series(iids_list), errors="coerce").dropna().astype(iid_dtype).tolist()
+            else:
+                iids_norm = pd.Series(iids_list).astype("string").str.strip().tolist()
+            iids_set = set(iids_norm)
+        else:
+            iids_set = None
+
+        # Stream chunks
+        for chunk in store.select(table_name, columns=cols, chunksize=chunksize):
+            # Normalize the iid column early (same as old)
+            if iidcol in chunk.columns:
+                try:
+                    chunk[iidcol] = normalize_iid_series(chunk[iidcol], target="int")
+                except Exception:
+                    # fallback: coerce to string and strip
+                    chunk[iidcol] = chunk[iidcol].astype("string").str.strip()
+
+            # DIAG mask (allow diags_list == None => accept all)
+            if diags_list is None:
+                diag_mask = pd.Series(True, index=chunk.index)
+            else:
+                s = chunk[diagcol].astype("string").str.strip()
+                dmask = pd.Series(False, index=chunk.index)
+                if exact_set:
+                    dmask |= s.isin(exact_set)
+                if prefixes:
+                    dmask |= s.str.startswith(tuple(prefixes), na=False)
+                diag_mask = dmask
+
+            # If no diag matches in this chunk, skip it early
+            if not diag_mask.any():
+                continue
+
+            # Restrict to diag-matching rows
+            chunk = chunk.loc[diag_mask].copy()
+
+            # IID mask
+            if iids_set is None:
+                iid_mask = pd.Series(True, index=chunk.index)
+            else:
+                # cast chunk iid to same dtype used above for iids_set
+                if pd.api.types.is_integer_dtype(iid_dtype) or pd.api.types.is_float_dtype(iid_dtype):
+                    iid_series = pd.to_numeric(chunk[iidcol], errors="coerce").astype(iid_dtype)
+                else:
+                    iid_series = chunk[iidcol].astype("string").str.strip()
+                iid_mask = iid_series.isin(iids_set)
+
+            mask = iid_mask
+            if mask.any():
+                out.append(chunk.loc[mask, cols if cols is not None else chunk.columns])
+
+    if out:
+        return pd.concat(out, ignore_index=True)
+
+    # fallback: empty but with real columns from store
+    with pd.HDFStore(h5_path, "r") as store:
+        st = store.get_storer(table_name)
+        fallback_cols = columns if columns is not None else [c for c in st.table.colnames if c != "index"]
+        return pd.DataFrame(columns=fallback_cols)
+
+def select_by_iid_and_diag_optimized__(
     h5_path,
     table_name,
     iidcol,
@@ -2008,7 +2508,7 @@ def select_by_iid_and_diag_optimized(
     diags_list = _norm_list(diags)
 
     if diags_list is None:
-        raise ValueError("You must provide at least one diagnosis code to filter on")
+        raise ValueError("[select_by_iid_and_diag_optimized] You must provide at least one diagnosis code to filter on")
 
     exact_set, prefixes = set(), []
     for d in map(str, diags_list):
@@ -2023,6 +2523,100 @@ def select_by_iid_and_diag_optimized(
     out = []
 
     with pd.HDFStore(h5_path, "r") as store:
+        # Determine iid dtype from first chunk (kept for logging/awareness)
+        try:
+            first_chunk = store.select(table_name, columns=[iidcol], stop=1)
+            iid_dtype = first_chunk[iidcol].dtype
+        except Exception:
+            iid_dtype = None
+
+        # Normalize supplied IIDs as strings to avoid dtype mismatch with stored data
+        if iids_list is not None:
+            iids_set = set(str(x).strip() for x in iids_list if x is not None and str(x).strip() != "")
+        else:
+            iids_set = None
+
+        for chunk in store.select(table_name, columns=cols, chunksize=chunksize):
+            # Step 1: Filter by diag
+            s = chunk[diagcol].astype("string").str.strip()
+            diag_mask = pd.Series(False, index=chunk.index)
+            if exact_set:
+                diag_mask |= s.isin(exact_set)
+            if prefixes:
+                diag_mask |= s.str.startswith(tuple(prefixes), na=False)
+
+            if not diag_mask.any():
+                continue  # No matching diag, skip
+
+            chunk = chunk.loc[diag_mask].copy()
+
+            # Step 2: Filter by IID if needed — compare as strings to avoid dtype mismatch
+            if iids_set is not None:
+                # normalize chunk IID column to string for membership check
+                try:
+                    chunk_iids = chunk[iidcol].astype("string").str.strip()
+                except Exception:
+                    # fallback: convert via map/str
+                    chunk_iids = chunk[iidcol].apply(lambda x: str(x).strip())
+                chunk = chunk[chunk_iids.isin(iids_set)]
+
+            if not chunk.empty:
+                out.append(chunk)
+
+    if out:
+        return pd.concat(out, ignore_index=True)
+
+    # fallback: empty but with correct columns
+    with pd.HDFStore(h5_path, "r") as store:
+        st = store.get_storer(table_name)
+        fallback_cols = columns if columns is not None else [c for c in st.table.colnames if c != "index"]
+        return pd.DataFrame(columns=fallback_cols)   
+
+def select_by_iid_and_diag_optimized_(
+    h5_path,
+    table_name,
+    iidcol,
+    iids,
+    diagcol,
+    diags,
+    *,
+    columns=None,
+    chunksize=200_000,
+    prefix_all=False,
+):
+    def _norm_list(x):
+        if x is None:
+            return None
+        if isinstance(x, (pd.Series, pd.Index)):
+            vals = x.tolist()
+        elif isinstance(x, np.ndarray):
+            vals = x.tolist()
+        elif not hasattr(x, "__iter__") or isinstance(x, (str, bytes)):
+            vals = [x]
+        else:
+            vals = list(x)
+        return [v for v in vals if str(v) != "nan" and v is not None]
+
+    iids_list = _norm_list(iids)
+    diags_list = _norm_list(diags)
+
+    if diags_list is None:
+        raise ValueError("[select_by_iid_and_diag_optimized] You must provide at least one diagnosis code to filter on")
+
+    exact_set, prefixes = set(), []
+    for d in map(str, diags_list):
+        d = d.strip()
+        if prefix_all or d.endswith("*"):
+            prefixes.append(d[:-1] if d.endswith("*") else d)
+        else:
+            exact_set.add(d)
+
+    need = {iidcol, diagcol}
+    cols = None if columns is None else list(dict.fromkeys([*columns, *need]))
+    out = []
+
+    with pd.HDFStore(h5_path, "r") as store:
+        # Determine iid dtype from first chunk
         first_chunk = store.select(table_name, columns=[iidcol], stop=1)
         iid_dtype = first_chunk[iidcol].dtype
 
@@ -2131,7 +2725,7 @@ def get_h5_cases(
     #     else:
     #         diags_dict = parse_pheno_rules(sublist)
     #         print(f"[get_h5_cases] diags:{diags}; diags_dict: {diags_dict}")
-
+    print(f"[get_h5_cases] diags before sanitization: {diags}")
     if diags:
         sanitized = []
         for entry in diags:
@@ -2139,12 +2733,12 @@ def get_h5_cases(
                 sanitized.extend(entry)       # pull items out of sublists
             else:
                 sanitized.append(entry)
-        logger.info(f"[get_h5_cases] sanitized: {sanitized}")
-        logger.info(f"[get_h5_cases] diags: {diags}")
+        print(f"[get_h5_cases] sanitized before directmapping check: {sanitized}")
+        logger.info(f"[get_h5_cases] sanitized: {sanitized}; diags: {diags}")
         # now overwrite
         diags = [str(d) for d in sanitized]  # coerce everything to str
     # Step 1: on-disk selection by iids if provided
-    df = select_by_iid_and_diag_optimized(h5_path=h5file, table_name=table_name, iidcol=iidcol, iids=iids, diagcol=diagcol, diags=diags, prefix_all={not directmapping})
+    df = select_by_iid_and_diag_optimized(h5_path=h5file, table_name=table_name, iidcol=iidcol, iids=iids, diagcol=diagcol, diags=diags, prefix_all=(not directmapping))
     try:
         logger.info(f"[get_h5_cases] df.head(5): {df.head(5)}; Identified {len(df.loc[1])} overlapping entries with the selected diags.")
     except:
@@ -2526,6 +3120,8 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
             logger.info("[process_pheno_and_exclusions] WARNING: Selected filter is not implemented yet!")
     if (len(df1) == 0):
         logger.info("[process_pheno_and_exclusions] ERROR: No IIDs left after initial Filtering. Consider using different Filters. Exiting")
+        if not verbose:
+            print("[process_pheno_and_exclusions] ERROR: No IIDs left after initial Filtering. Consider using different Filters. Exiting")
         exit()
     gc.collect()
     if (qced_iids != ""):
@@ -3250,28 +3846,22 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     final_df = final_df_.copy()
     del(final_df_)
     if "fkode" in final_df.columns:
-        #As exclusion criterion
-        min_code = 5000
-        max_code = 7000
-        logger.info("[process_pheno_and_exclusions] Updating Information about DK born or not. This uses everything between 5000-7000 on the fkode as non-DK. Find more details here https://www.dst.dk/da/Statistik/dokumentation/Times/cpr-oplysninger/foedreg-kode")
+        logger.info("[process_pheno_and_exclusions] Updating Information about DK born or not. This uses the selected country numbers used by Oleguer Plana-Ripoll https://osf.io/zhfyp/files/2cyvs on the fkode/fkode_m/fkode_f. Find more details here https://www.dst.dk/da/Statistik/dokumentation/Times/cpr-oplysninger/foedreg-kode")
         try:
             final_df['both_parents_DK'] = False
             final_df['fkode_m'] = pd.to_numeric(final_df['fkode_m'], errors='coerce')
             final_df['fkode_f'] = pd.to_numeric(final_df['fkode_f'], errors='coerce')
             final_df['fkode'] = pd.to_numeric(final_df['fkode'], errors='coerce')
-            #final_df.loc[(final_df['fkode_m'] >= min_code) & (final_df['fkode_m'] <= max_code) & (final_df['fkode_f'] >= min_code) & (final_df['fkode_f'] <= max_code), 'both_parents_DK'] = True
-            # Check if both parents have codes within the given range
             final_df.loc[
-                (final_df['fkode_m'].between(min_code, max_code)) & 
-                (final_df['fkode_f'].between(min_code, max_code)), 
-                'both_parents_DK'
-            ] = True
+                    (BirthCountry_DK(final_df['fkode_m']) == "Denmark") & 
+                    (BirthCountry_DK(final_df['fkode_f']) == "Denmark") , 
+                    'both_parents_DK'
+                ] = True
             final_df._consolidate_inplace()
             final_df['DK_born'] = False
-            #final_df.loc[(final_df['fkode'] >= min_code) & (final_df['fkode'] <= max_code), 'DK_born'] = True
-            final_df.loc[final_df['fkode'].between(min_code, max_code), 'DK_born'] = True
+            final_df.loc[(BirthCountry_DK(final_df['fkode']) == "Denmark"), 'DK_born'] = True
         except Exception as e:
-            logger.info(f"""[process_pheno_and_exclusions] An error occurred while comparing final_df['fkode','fkode_m','fkode_f'], and min_code/max_code.\n
+            logger.info(f"""[process_pheno_and_exclusions] An error occurred while mapping final_df['fkode','fkode_m','fkode_f'].\n
                         Head of the file:\n{final_df[['fkode','fkode_m', 'fkode_f']].head(5)}\n
                         Error message: {e}""")
     write_mode = 'w'
@@ -3453,6 +4043,7 @@ def build_ExDEP_exclusions(
     
     return casecontrol_df
 
+
 def merge_IIDs(
     tmp_result_df: pd.DataFrame,
     diagnostic_col: str,
@@ -3618,6 +4209,124 @@ def expand_ranges_old(code_list):
         return expanded
 
 def expand_ranges(code_list):
+    """
+    Expand shorthand ranges in a list (or single string) of code tokens.
+
+    Handles:
+      - "T36-T38"                 -> ["T36","T37","T38"]
+      - "36-38"                   -> ["36","37","38"]
+      - "ICD10:T36-ICD10:T38"     -> ["ICD10:T36","ICD10:T37","ICD10:T38"]
+      - "ICD10:T36-T38"           -> ["ICD10:T36","ICD10:T37","ICD10:T38"]
+    Accepts either a list/Series of tokens or a single comma-separated string.
+    Falls back to returning the original token when it cannot be parsed.
+    """
+    expanded: List[str] = []
+
+    def _parse_side(s: str):
+        s = s.strip()
+        if not s:
+            return None
+        pref = ""
+        rest = s
+        if ":" in s:
+            parts = s.split(":", 1)
+            pref = parts[0].strip() + ":"
+            rest = parts[1].strip()
+        # allow letters part that can be 1-2 letters (e.g., T or DF) and numeric (with optional decimal)
+        m = re.match(r"^([A-Za-z]{1,2})(\d+)(?:\.(\d+))?$", rest)
+        if m:
+            letters, num, _ = m.groups()
+            return pref, letters, int(num)
+        m2 = re.match(r"^(\d+)$", rest)
+        if m2:
+            return pref, "", int(m2.group(1))
+        return None
+
+    # Normalize input: if single string that contains commas, split on commas first
+    if isinstance(code_list, str):
+        if "," in code_list:
+            tokens = [t.strip() for t in code_list.split(",") if t.strip() != ""]
+        else:
+            tokens = [code_list]
+    elif code_list is None:
+        return []
+    else:
+        try:
+            tokens = list(code_list)
+        except Exception:
+            tokens = [code_list]
+
+    for token in tokens:
+        if token is None:
+            continue
+        code = str(token).strip()
+        if not code:
+            continue
+
+        # If there's no dash, keep as-is
+        if "-" not in code:
+            expanded.append(code)
+            continue
+
+        # split only on the first dash to allow colons on the right side
+        left_raw, right_raw = map(str.strip, code.split("-", 1))
+
+        # Pure numeric range: "36-38"
+        if left_raw.isdigit() and right_raw.isdigit():
+            start, end = int(left_raw), int(right_raw)
+            if start <= end:
+                expanded.extend([str(i) for i in range(start, end + 1)])
+            else:
+                expanded.append(code)
+            continue
+
+        # Try parsing both sides structurally
+        lp = _parse_side(left_raw)
+        rp = _parse_side(right_raw)
+        if lp and rp:
+            lpref, lletters, lnum = lp
+            rpref, rletters, rnum = rp
+
+            # If letter part matches (or both empty numeric), build range
+            if lletters == rletters:
+                if lnum <= rnum:
+                    use_pref = lpref or rpref or ""
+                    if lletters:
+                        expanded += [f"{use_pref}{lletters}{i}" for i in range(lnum, rnum + 1)]
+                    else:
+                        expanded += [str(i) for i in range(lnum, rnum + 1)]
+                    continue
+                else:
+                    expanded.append(code)
+                    continue
+            else:
+                # Different letter parts (rare) -> cannot safely expand -> keep original
+                expanded.append(code)
+                continue
+
+        # Back-compat simple pattern "T36-T38" (no colon)
+        m = re.match(r"^([A-Za-z]{1,2})(\d+)-\1(\d+)$", code.replace(" ", ""))
+        if m:
+            letters, start_s, end_s = m.groups()
+            s_i, e_i = int(start_s), int(end_s)
+            if s_i <= e_i:
+                expanded += [f"{letters}{i}" for i in range(s_i, e_i + 1)]
+                continue
+
+        # Generic numeric fallback
+        mnum = re.match(r"^(\d+)-(\d+)$", code)
+        if mnum:
+            s_i, e_i = map(int, mnum.groups())
+            if s_i <= e_i:
+                expanded += [str(i) for i in range(s_i, e_i + 1)]
+                continue
+
+        # Unparseable -> keep as-is
+        expanded.append(code)
+
+    return expanded
+
+def expand_ranges_(code_list):
     """
     Expand shorthand ranges in a list (or single string) of code tokens.
     Supported forms:
@@ -3885,6 +4594,8 @@ def map_cases(values_to_match, exact_match, df1, diagcol, cols=None):
                 out = (df1.loc[diag_mask, cols if cols is not None else df1.columns])
             return out
         logger.info(f"[map_cases] ERROR: No values_to_match supplied: {values_to_match}")
+        if not verbose:
+            print(f"[map_cases] ERROR: No values_to_match supplied: {values_to_match}")
 
 
 def build_phenotype_cases(

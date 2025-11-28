@@ -1361,35 +1361,6 @@ Build_sankey_data <- function(data, fn, iidcol, verbose = FALSE) {
   return(data)
 }
 
-Exclusion_interpreter <- function(data, excl, type, min_Age, max_Age, exclnumber, verbose = FALSE) {
-  data$diagnoses_Level2_modifier <- vector("list", nrow(data))
-  data$disorder_Level2_modifier <- vector("list", nrow(data))
-  data$date_Level2_modifier <- vector("list", nrow(data))
-  data$Level2_diagnoses <- data$diagnoses
-  data$Level2_dates <- data$in_dates
-  data$Level2_AgeExclusion <- "FALSE"
-  data$Level2_ExclusionReason <- vector("list", nrow(data))
-  data$Level2_FirstDx <- vector("list", nrow(data))
-  if (verbose) {
-    print(head(data, 2))
-  }
-  cat("Updating based on Age exclusions: min=", min_Age, " max=", max_Age, "\n")
-  data <- data %>% mutate(Level3_Age_FirstDx = 0)
-  case_rows <- ifelse(sapply(data$in_dates, length) > 0, TRUE, FALSE)
-  if (any(case_rows)) {
-    data$Level2_FirstDx[case_rows] <- lapply(data$in_dates[case_rows], min, na.rm = TRUE)
-    data$Level3_Age_FirstDx[case_rows] <- sapply(seq_len(sum(case_rows)), function(i) {
-      as.integer(difftime(min(data$in_dates[[i]], na.rm = TRUE), as.Date(data$birthdate[i]), units = "days")) %/% 365
-    })
-  }
-  if (min_Age != 0 || max_Age != 0) {
-    data <- data %>% mutate(Level2_AgeExclusion = if_else(Level3_Age_FirstDx < min_Age | (Level3_Age_FirstDx > max_Age & Level3_Age_FirstDx > 0), "TRUE", "FALSE"))
-  }
-  data$diagnosis <- if_else(data$diagnosis == "Control", "Control", "Case")
-  data$Level3_CaseControl <- data$diagnosis
-  return(data)
-}
-
 update_DxDates_ExDEP_multi_exclusion <- function(all_data, exclusion_type, exc_diag, exc_diag_date,
                                                  exc_diag_inflicted_changes, diag_excode, level2codes,
                                                  level2dates, level2datemodifiercodes, level2datemodifierdates,
@@ -1647,109 +1618,7 @@ finalize_lpr_data <- function(df1, diagnostic_col, birthdatecol, verbose) {
   df1
 }
 
-#############################
-# Core Processing Function
-#############################
-
-process_pheno_and_exclusions <- function(df1, df3, df4, params) {
-  # Merge with stam file (df3) if provided
-  if (!is.null(df3)) {
-    setkeyv(df1, params$iidcol)
-    setkeyv(df3, params$iidcol)
-    df1 <- merge(df1, df3, by = params$iidcol, all.x = TRUE)
-  }
-  
-  # Merge with additional IID file (df4) if provided
-  if (!is.null(df4)) {
-    setkeyv(df1, params$iidcol)
-    setkeyv(df4, params$iidcol)
-    df1 <- merge(df1, df4, by = params$iidcol, all.x = TRUE)
-  }
-  
-  # Remove point in diagnostic code if flag is set
-  if (params$removePointInDiagCode) {
-    df1[[params$fcol]] <- gsub("\\.", "", df1[[params$fcol]])
-  }
-  
-  # Convert diagnosis date columns using the provided DateFormat
-  if (params$din %in% names(df1)) {
-    df1[[params$din]] <- as.Date(df1[[params$din]], format = params$DateFormat)
-  }
-  if (params$don %in% names(df1)) {
-    df1[[params$don]] <- as.Date(df1[[params$don]], format = params$DateFormat)
-  }
-  
-  # Filter by Year of Birth if provided (exclude those born before the given date)
-  if (nzchar(params$Fyob) && params$bdcol %in% names(df1)) {
-    df1[[params$bdcol]] <- as.Date(df1[[params$bdcol]], format = params$DateFormat)
-    df1 <- df1[df1[[params$bdcol]] >= as.Date(params$Fyob), ]
-  }
-  
-  # Filter by Gender if provided
-  if (nzchar(params$Fgender) && params$sexcol %in% names(df1)) {
-    df1 <- df1[df1[[params$sexcol]] == params$Fgender, ]
-  }
-  
-  # LifetimeExclusion: remove records with diagnostic codes in the exclusion list
-  if (nzchar(params$LifetimeExclusion)) {
-    excl <- fread(params$LifetimeExclusion, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
-    codes <- if(ncol(excl) == 1) unlist(strsplit(excl[[1]], split = ",")) else unlist(strsplit(excl[[2]], split = ","))
-    codes <- trimws(codes)
-    df1 <- df1[!(df1[[params$fcol]] %in% codes), ]
-  }
-  
-  # PostExclusion: per IID, drop records after first occurrence of an exclusion code
-  if (nzchar(params$PostExclusion)) {
-    excl <- fread(params$PostExclusion, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
-    codes <- if(ncol(excl) == 1) unlist(strsplit(excl[[1]], split = ",")) else unlist(strsplit(excl[[2]], split = ","))
-    codes <- trimws(codes)
-    setorder(df1, get(params$din))
-    df1 <- df1[, {
-      excl_dates <- get(params$din)[get(params$fcol) %in% codes]
-      if (length(excl_dates) > 0) {
-        cutoff <- min(excl_dates, na.rm = TRUE)
-        .SD[get(params$din) <= cutoff]
-      } else {
-        .SD
-      }
-    }, by = params$iidcol]
-  }
-  
-  # OneYearPriorExclusion: per IID, remove records within one year prior to any exclusion code occurrence
-  if (nzchar(params$OneyPriorExclusion)) {
-    excl <- fread(params$OneyPriorExclusion, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
-    codes <- if(ncol(excl) == 1) unlist(strsplit(excl[[1]], split = ",")) else unlist(strsplit(excl[[2]], split = ","))
-    codes <- trimws(codes)
-    df1 <- df1[, {
-      excl_dates <- get(params$din)[get(params$fcol) %in% codes]
-      if (length(excl_dates) > 0) {
-        cutoff <- min(excl_dates, na.rm = TRUE)
-        .SD[ get(params$din) < (cutoff - years(1)) | get(params$din) >= cutoff ]
-      } else {
-        .SD
-      }
-    }, by = params$iidcol]
-  }
-  
-  # MatchFI: restrict records to those that match phenotype request codes
-  if (params$MatchFI && !is.null(params$in_pheno_codes)) {
-    valid_codes <- unique(params$in_pheno_codes[[params$gcol]])
-    df1 <- df1[df1[[params$fcol]] %in% valid_codes, ]
-  }
-  
-  # BuildEntryExitDates: add first and last diagnosis dates per IID
-  if (params$BuildEntryExitDates && params$din %in% names(df1) && params$don %in% names(df1)) {
-    entry_exit <- df1[, .(first_in = min(get(params$din), na.rm = TRUE),
-                            last_out = max(get(params$don), na.rm = TRUE)),
-                      by = params$iidcol]
-    df1 <- merge(df1, entry_exit, by = params$iidcol, all.x = TRUE)
-  }
-  
-  return(df1)
-}
-
-
-process_pheno_and_exclusions_old <- function(MatchFI, df3, df1, iidcol, verbose, ctype_excl, ctype_incl, Filter_YoB, Filter_Gender,
+process_pheno_and_exclusions <- function(MatchFI, df3, df1, iidcol, verbose, ctype_excl, ctype_incl, Filter_YoB, Filter_Gender,
                                          use_predefined_exdep_exclusions, RegisterRun, dst, ipsych_run, dbds_run, cluster_run,
                                          exact_match, skip_icd_update, remove_point_in_diag_request, ICDCM, qced_iids, general_exclusions,
                                          multi_inclusions, in_pheno_codes, pheno_requestcol, diagnostic_col, atc_diag_col, birthdatecol,
@@ -2477,15 +2346,39 @@ process_pheno_and_exclusions_old <- function(MatchFI, df3, df1, iidcol, verbose,
 
     # Final selection – no errors on missing columns
     tmp_final_df <- final_df %>% select(any_of(selected_cols))
-
-Exclusion_interpreter <- function(data, excl, type, min_Age, max_Age, exclnumber, verbose = FALSE) {
-    final_df <- left_join(final_df, Exclusion_interpreter(data=tmp_final_df %>% filter(diagnosis == "Case"),
-                                                                min_Age=min_Age, max_Age=max_Age, verbose=verbose), by = iidcol)
+    final_df <- left_join(final_df, Exclusion_interpreter(tmp_final_df %>% filter(diagnosis == "Case"),
+                                                                min_Age, max_Age, verbose), by = iidcol)
     final_df$Level2_AgeExclusion[is.na(final_df$Level2_AgeExclusion)] <- "FALSE"
     final_df <- final_df %>% mutate(Level3_CaseControl = if_else(diagnosis == "Control", "Control", "Case"))
     final_df <- Build_sankey_data(final_df, outfile, iidcol, verbose)
-    final_df$Level2_ExclusionReason <- lapply(final_df$Level2_ExclusionReason, sort)
-    final_df$Level2_FirstDx <- lapply(final_df$Level2_FirstDx, sort)
+    # final_df$Level2_ExclusionReason <- lapply(final_df$Level2_ExclusionReason, sort)
+    # final_df$Level2_FirstDx <- lapply(final_df$Level2_FirstDx, sort)
+    final_df$Level2_ExclusionReason <- lapply(final_df$Level2_ExclusionReason, function(x) {
+      # flatten and remove NA / empty entries, return sorted unique character vector
+      y <- unlist(x, recursive = TRUE, use.names = FALSE)
+      y <- y[!is.na(y) & y != ""]
+      if (length(y) == 0) return(character(0))
+      y <- unique(as.character(y))
+      sort(y)
+    })
+
+    final_df$Level2_FirstDx <- lapply(final_df$Level2_FirstDx, function(x) {
+      # flatten and remove NA / empty entries, try to coerce to Date; return sorted unique Date vector if possible
+      y <- unlist(x, recursive = TRUE, use.names = FALSE)
+      y <- y[!is.na(y) & y != ""]
+      if (length(y) == 0) return(as.Date(character(0)))
+      # attempt to parse common date formats
+      dt <- as.Date(y, tryFormats = c("%Y-%m-%d", "%d.%m.%Y", "%Y/%m/%d", "%m/%d/%Y", "%Y%m%d"))
+      if (!all(is.na(dt))) {
+        dt <- dt[!is.na(dt)]
+        dt <- unique(dt)
+        sort(dt)
+      } else {
+        # fallback: return sorted unique character values
+        y2 <- unique(as.character(y))
+        sort(y2)
+      }
+    })
   }
   
   if ("dbds" %in% colnames(final_df)) {
@@ -2628,6 +2521,414 @@ Exclusion_interpreter <- function(data, excl, type, min_Age, max_Age, exclnumber
   return(final_df)
 }
 
+Exclusion_interpreter <- function(
+    data,
+    min_Age = 0,
+    max_Age = 0,
+    lifetime_exclusions = data.frame(),
+    oneYearPrior_exclusions = data.frame(),
+    post_exclusions = data.frame(),
+    date_format = "%Y-%m-%d",
+    verbose = FALSE
+) {
+    out <- data
+
+    cols_to_drop <- c('temp_Level2_dates','diagnosis','diagnoses','first_dx','in_dates','c_diagtype','Age_FirstDx','birthdate','temp_birthdate')
+
+    # ensure list-columns exist (real list-columns in R)
+    list_cols <- c(
+        'diagnoses_Level2_modifier','disorder_Level2_modifier','date_Level2_modifier',
+        'Level2_diagnoses','Level2_dates','Level2_ExclusionReason','Level2_FirstDx'
+    )
+    for (col in list_cols) {
+        if (!col %in% names(out)) out[[col]] <- vector("list", nrow(out))
+    }
+
+    # copy base Level2 columns (ensure list-columns)
+    if ("diagnoses" %in% names(out)) {
+        out$Level2_diagnoses <- lapply(out$diagnoses, function(x) if (is.null(x)) list() else as.list(x))
+    } else {
+        out$Level2_diagnoses <- vector("list", nrow(out))
+    }
+    if ("in_dates" %in% names(out)) {
+        out$Level2_dates <- lapply(out$in_dates, function(x) if (is.null(x)) list() else as.list(x))
+    } else {
+        out$Level2_dates <- vector("list", nrow(out))
+    }
+
+    if (!("Level2_AgeExclusion" %in% names(out))) out$Level2_AgeExclusion <- rep("False", nrow(out))
+
+    # --- AGE exclusion (compute Age_FirstDx similar to python) ---
+    if (min_Age != 0 || max_Age != 0) {
+        if (verbose) cat("[Exclusion_interpreter] applying age rules\n")
+        # robust first_dx from Level2_dates / in_dates
+        to_date <- function(lst) {
+            if (is.null(lst) || length(lst) == 0) return(NA_Date_)
+            # try to coerce each element to Date
+            ds <- as.Date(unlist(lst), format = date_format)
+            ds[!is.na(ds)]
+        }
+        first_dx_vec <- sapply(out$Level2_dates, function(x) {
+            d <- to_date(x)
+            if (length(d)) min(d, na.rm = TRUE) else as.Date(NA)
+        })
+        birth_vec <- if ("birthdate" %in% names(out)) as.Date(out$birthdate) else rep(as.Date(NA), nrow(out))
+        age_years <- as.integer(floor(as.numeric(first_dx_vec - birth_vec) / 365.25))
+        out$Age_FirstDx <- age_years
+        mask_age_excl <- (!is.na(age_years)) & ((age_years < min_Age) | ((age_years > max_Age) & (age_years > 0)))
+        out$Level2_AgeExclusion[which(mask_age_excl)] <- "True"
+        # append reason code 1 for age
+        for (i in which(mask_age_excl)) {
+            out$Level2_ExclusionReason[[i]] <- unique(c(out$Level2_ExclusionReason[[i]], 1))
+        }
+    }
+
+    # Helper to apply an exclusion table (mirrors Python _apply_table)
+    apply_table <- function(df, table, etype, cols_to_drop_in) {
+        if (is.null(table) || nrow(table) == 0 || !("Disorder" %in% names(table))) return(list(df = df, cols_to_drop = cols_to_drop_in))
+        exclNumber <- 1
+        for (disorder in table$Disorder) {
+            if (verbose) cat(sprintf("[Exclusion_interpreter] applying %s exclusion for %s\n", etype, disorder))
+            # skip if column not present or no overlap
+            if (!(disorder %in% names(df))) { exclNumber <- exclNumber + 1; next }
+            has_rows <- (sapply(df$diagnoses, function(x) length(x) > 0) & nzchar(as.character(df[[disorder]])))
+            if (any(has_rows, na.rm = TRUE)) {
+                # call R updater - ensure function exists and signature matches
+                if (exists("update_DxDates_ExDEP_multi_exclusion", mode = "function")) {
+                    df <- update_DxDates_ExDEP_multi_exclusion(
+                        df,
+                        exclusion_type = etype,
+                        exc_diag = disorder,
+                        exc_diag_date = paste0(disorder, "_In_Dates"),
+                        exc_diag_inflicted_changes = paste0(disorder, "_Inflicted_changes"),
+                        diag_excode = exclNumber,
+                        level2codes = "Level2_diagnoses",
+                        level2dates = "Level2_dates",
+                        level2datemodifiercodes = "diagnoses_Level2_modifier",
+                        level2datemodifierdates = "date_Level2_modifier",
+                        level2datemodifierDXs = "disorder_Level2_modifier",
+                        date_format = date_format,
+                        verbose = verbose
+                    )
+                } else {
+                    warning("update_DxDates_ExDEP_multi_exclusion not found; skipping actual per-row updates")
+                }
+            } else {
+                if (verbose) cat(sprintf("No Case overlap with %s. Skipping\n", disorder))
+            }
+            # add columns to drop later
+            cols_to_drop_in <- unique(c(cols_to_drop_in, disorder, paste0(disorder, "_Out_Dates"), paste0(disorder, "_In_Dates")))
+            exclNumber <- exclNumber + 1
+        }
+        return(list(df = df, cols_to_drop = cols_to_drop_in))
+    }
+
+    # apply tables
+    res <- apply_table(out, oneYearPrior_exclusions, "1yprior", cols_to_drop)
+    out <- res$df; cols_to_drop <- res$cols_to_drop
+    res <- apply_table(out, post_exclusions, "post", cols_to_drop)
+    out <- res$df; cols_to_drop <- res$cols_to_drop
+    res <- apply_table(out, lifetime_exclusions, "lifetime", cols_to_drop)
+    out <- res$df; cols_to_drop <- res$cols_to_drop
+
+    # Age-exclusion cleanup: clear Level2 fields and tag modifier
+    mask_age_true <- out$Level2_AgeExclusion == "True"
+    if (any(mask_age_true)) {
+        idxs <- which(mask_age_true)
+        for (i in idxs) {
+            out$Level2_dates[[i]] <- list()
+            out$Level2_diagnoses[[i]] <- list()
+            out$disorder_Level2_modifier[[i]] <- unique(c(out$disorder_Level2_modifier[[i]], "Age"))
+        }
+    }
+
+    # Compute Level2_FirstDx from Level2_dates (min dates)
+    out$Level2_FirstDx <- lapply(out$Level2_dates, function(xs) {
+        if (length(xs) == 0) return(list())
+        ds <- as.Date(unlist(xs), format = date_format)
+        if (all(is.na(ds))) return(list())
+        list(min(ds, na.rm = TRUE))
+    })
+
+    # Recalculate level3 age using Level2_FirstDx and birthdate
+    birth <- if ("birthdate" %in% names(out)) as.Date(out$birthdate) else rep(as.Date(NA), nrow(out))
+    first_dx0 <- sapply(out$Level2_FirstDx, function(x) if (length(x) > 0) as.Date(x[[1]]) else as.Date(NA))
+    out$Level3_Age_FirstDx <- as.integer(floor(as.numeric(first_dx0 - birth) / 365.25))
+    out$Level3_Age_FirstDx[is.na(out$Level3_Age_FirstDx)] <- 0
+
+    # Case/Control label similar to python
+    out$Level3_CaseControl <- rep("Control", nrow(out))
+    if ("diagnosis" %in% names(out)) out$Level3_CaseControl[out$diagnosis == "Case"] <- "Case_Excluded"
+    has_level2_first <- sapply(out$Level2_FirstDx, function(xs) length(xs) > 0)
+    out$Level3_CaseControl[has_level2_first] <- "Case"
+
+    # Drop temporary columns if present
+    drop_cols <- intersect(cols_to_drop, names(out))
+    if (length(drop_cols)) out[ , drop_cols] <- NULL
+
+    return(out)
+}
+
+Exclusion_interpreter_old <- function(
+    data,
+    min_Age = 0,
+    max_Age = 0,
+    lifetime_exclusions = data.frame(),
+    oneYearPrior_exclusions = data.frame(),
+    post_exclusions = data.frame(),
+    date_format = "%Y-%m-%d",
+    verbose = FALSE
+) {
+
+    out <- data
+
+    cols_to_drop <- c('temp_Level2_dates','diagnosis','diagnoses','first_dx','in_dates',
+                      'c_diagtype','Age_FirstDx','birthdate','temp_birthdate')
+
+    # list based storage fields
+    list_cols <- c(
+        'diagnoses_Level2_modifier', 'disorder_Level2_modifier', 'date_Level2_modifier',
+        'Level2_diagnoses', 'Level2_dates', 'Level2_ExclusionReason', 'Level2_FirstDx'
+    )
+
+    for (col in list_cols) {
+        if (!(col %in% names(out))) {
+            out[[col]] <- vector("list", nrow(out))
+        }
+    }
+
+    # base Level2 copies
+    out$Level2_diagnoses <- lapply(out$diagnoses, as_list)
+    out$Level2_dates <- lapply(out$in_dates, as_list)
+
+    if (!("Level2_AgeExclusion" %in% names(out))) {
+        out$Level2_AgeExclusion <- rep("False", nrow(out))
+    }
+
+    # ──────────────────────────────────────────────────────────────
+    # AGE-BASED EXCLUSION
+    # ──────────────────────────────────────────────────────────────
+
+    if (min_Age != 0 | max_Age != 0) {
+
+        if (verbose)
+            logger$info(sprintf("[Exclusion_interpreter] Updating Case-Diagnoses based on Age, min=%s, max=%s", min_Age, max_Age))
+
+        # First diagnosis
+        # first_dx <- lapply(out$in_dates, function(x) {
+        #     x <- to_dt_list(x)
+        #     #if (length(x)) min(x) else as.Date(NA)
+        #     if (length(x)) min(unlist(x)) else as.Date(NA)
+        # })
+        first_dx <- lapply(out$in_dates, function(x) {
+            x <- to_dt_list(x)
+            if (length(x)) min(unlist(x)) else as.Date(NA)
+        })
+        first_dx <- as.Date(unlist(first_dx), origin="1970-01-01")
+
+        # Last diagnosis
+        if ("out_dates" %in% names(out)) {
+            # last_dx <- lapply(out$out_dates, function(x) {
+            #     x <- to_dt_list(x)
+            #     if (length(x)) max(x) else as.Date(NA)
+            # })
+            last_dx <- lapply(out$out_dates, function(x) {
+                x <- to_dt_list(x)
+                if (length(x)) max(unlist(x)) else as.Date(NA)
+            })
+            last_dx <- as.Date(unlist(last_dx), origin="1970-01-01")
+        } else {
+            last_dx <- first_dx
+        }
+
+        # birthdate
+        birth <- as.Date(out$birthdate, format=date_format)
+
+        # Calculate age
+        age_years <- as.integer((as.numeric(first_dx - birth)) / 365)
+        out$Age_FirstDx <- age_years
+
+        # exclusion mask
+        mask_age_excl <- ((age_years < min_Age) | ((age_years > max_Age) & (age_years > 0)))
+        mask_age_excl[is.na(mask_age_excl)] <- FALSE  # <<< fix
+
+        # assign labels
+        out$Level2_AgeExclusion[mask_age_excl] <- "True"
+        out$Level2_ExclusionReason[mask_age_excl] <- 
+            lapply(out$Level2_ExclusionReason[mask_age_excl], function(x) c(as_list(x), 1))
+        # age_years <- as.integer((as.numeric(first_dx - birth)) / 365)
+        # out$Age_FirstDx <- age_years
+
+        # mask_age_excl <- (age_years < min_Age) | ((age_years > max_Age) & age_years > 0)
+
+        # out$Level2_AgeExclusion[mask_age_excl] <- "True"
+
+        # out$Level2_ExclusionReason[mask_age_excl] <-
+        #     lapply(out$Level2_ExclusionReason[mask_age_excl], function(x) c(as_list(x), 1))
+    }
+
+    # ──────────────────────────────────────────────────────────────
+    # HELPER: apply a table of exclusions
+    # ──────────────────────────────────────────────────────────────
+
+    apply_table <- function(df, table, etype, cols_to_drop) {
+        if (nrow(table) == 0 || !("Disorder" %in% names(table))) return(list(df, cols_to_drop))
+        exclNumber <- 1
+
+        for (disorder in table$Disorder) {
+
+            if (verbose)
+                logger$info(sprintf("Applying %s exclusion for %s", etype, disorder))
+
+            has_rows <- (as.character(df$diagnoses) != "") &
+                        (as.character(df[[disorder]]) != "")
+
+            if (any(has_rows, na.rm=TRUE)) {
+                df <- update_DxDates_multi_exclusion(
+                    df,
+                    etype,
+                    disorder,
+                    paste0(disorder, "_In_Dates"),
+                    paste0(disorder, "_Inflicted_changes"),
+                    exclNumber,
+                    "Level2_diagnoses",
+                    "Level2_dates",
+                    "diagnoses_Level2_modifier",
+                    "date_Level2_modifier",
+                    "disorder_Level2_modifier",
+                    date_format = date_format
+                )
+            } else {
+                if (verbose)
+                    logger$info(sprintf("No Case overlap with %s — skipping", disorder))
+            }
+
+            exclNumber <- exclNumber + 1
+
+            cols_to_drop <- union(cols_to_drop,
+                                  c(disorder,
+                                    paste0(disorder, "_Out_Dates"),
+                                    paste0(disorder, "_In_Dates")))
+        }
+        return(list(df, cols_to_drop))
+    }
+
+    res <- apply_table(out, oneYearPrior_exclusions, "1yprior", cols_to_drop)
+    out <- res[[1]]; cols_to_drop <- res[[2]]
+
+    res <- apply_table(out, post_exclusions, "post", cols_to_drop)
+    out <- res[[1]]; cols_to_drop <- res[[2]]
+
+    res <- apply_table(out, lifetime_exclusions, "lifetime", cols_to_drop)
+    out <- res[[1]]; cols_to_drop <- res[[2]]
+
+    # ──────────────────────────────────────────────────────────────
+    # FINAL AGE-EXCLUSION CLEANUP
+    # ──────────────────────────────────────────────────────────────
+
+    mask_age_true <- out$Level2_AgeExclusion == "True"
+
+    if (any(mask_age_true)) {
+        out$Level2_dates[mask_age_true] <- lapply(which(mask_age_true), function(i) list())
+        out$Level2_diagnoses[mask_age_true] <- lapply(which(mask_age_true), function(i) list())
+
+        out$disorder_Level2_modifier[mask_age_true] <-
+            lapply(out$disorder_Level2_modifier[mask_age_true], function(x) c(as_list(x), "Age"))
+    }
+
+    # Compute Level2_FirstDx
+    # out$Level2_FirstDx <- lapply(out$Level2_dates, function(x) {
+    #     xs <- to_dt_list(x)
+    #     if (length(xs)) list(min(xs)) else list()
+    # })
+    out$Level2_FirstDx <- lapply(out$Level2_dates, function(xs) {
+        xs <- to_dt_list(xs)
+        if (length(xs)) list(min(unlist(xs))) else list()
+    })
+
+    # recalc age using Level2
+    level2_first_raw <- lapply(out$Level2_FirstDx, function(xs) {
+        if (length(xs)) xs[[1]] else as.Date(NA)
+    })
+    level2_first_raw <- as.Date(unlist(level2_first_raw), origin="1970-01-01")
+
+    out$Level3_Age_FirstDx <- as.integer((as.numeric(level2_first_raw - birth)) / 365)
+    out$Level3_Age_FirstDx[is.na(out$Level3_Age_FirstDx)] <- 0
+
+    # case/control label
+    out$Level3_CaseControl <- "Control"
+    out$Level3_CaseControl[out$diagnosis == "Case"] <- "Case_Excluded"
+    out$Level3_CaseControl[sapply(out$Level2_FirstDx, function(xs) length(xs) > 0)] <- "Case"
+
+    # Drop temp columns
+    cols_to_drop <- intersect(cols_to_drop, names(out))
+    out[, cols_to_drop] <- NULL
+
+    return(out)
+}
+
+to_dt_list <- function(x) {
+    arr <- as_list(x)
+    if (length(arr) == 0) return(list())
+
+    # convert every element to Date
+    ts <- lapply(arr, function(v) {
+        as.Date(v, tryFormats = c("%Y-%m-%d", "%Y/%m/%d",
+                                  "%d.%m.%Y", "%m/%d/%Y",
+                                  "%Y%m%d"))
+    })
+
+    # flatten and remove NA values
+    ts <- unlist(ts)
+
+    ts <- ts[!is.na(ts)]
+
+    # return as list
+    return(as.list(ts))
+}
+
+as_list <- function(x) {
+    if (is.null(x)) return(list())
+
+    # If already list, use it; else wrap in list
+    seq <- if (is.list(x)) x else list(x)
+
+    seq <- Filter(function(item) {
+        if (is.null(item)) return(FALSE)
+
+        # if it's a vector: check whether any element is non-empty
+        if (length(item) > 1) {
+            return(any(trimws(as.character(item)) != ""))
+        }
+
+        # scalar case
+        if (is.character(item)) {
+            return(trimws(item) != "")
+        }
+
+        return(TRUE)
+    }, seq)
+
+    return(seq)
+}
+
+as_list_old <- function(x) {
+
+    print(x)
+    if (is.null(x)) return(list())
+    if (is.list(x)) {
+        seq <- x
+    } else {
+        seq <- list(x)
+    }
+    # remove empty-string entries and NULLs
+    seq <- Filter(function(item) {
+        !is.null(item) &&
+        !(is.character(item) && trimws(item) == "")
+    }, seq)
+
+    return(seq)
+}
 
 batch_load_lprfile <- function(df, lprfile, iidcol, iid_batch, batch_num, fsep, potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date, verbose) {
   cat("Processing batch", batch_num, "\n")

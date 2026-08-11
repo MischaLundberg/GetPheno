@@ -3,6 +3,17 @@
 # GetPheno
 [Build Phenotypes](#1-build-phenotypes)
 
+## Current capabilities
+
+- Builds one or multiple phenotypes in one run from ICD8, ICD9, ICD10, ICD9-CM, ICD10-CM, and ATC code requests.
+- Supports tab-separated multi-phenotype request files with one phenotype name per row and comma-separated codes per phenotype.
+- By default, diagnostic requests are matched as prefixes. Use `--eM` for exact matching; a trailing `*` always keeps that code prefix-based, also when `--eM` is used.
+- Supports lifetime, one-year-prior, and post-onset exclusion files, including ATC-based exclusions.
+- Supports `--lowmem` and `--verylowmem` batching with fixed output columns across batches, so appended TSV output keeps a stable schema.
+- Restricts each batch to the current STAM/IID universe and applies QC (`--qced`) and general exclusions before case/control output is finalized.
+- Writes per-phenotype status columns as `Case` or `Control`; phenotype detail columns remain blank when not applicable.
+- Preserves STAM columns first in the output, followed by requested phenotypes, exclusions, covariates, and derived fields.
+- Writes SHA256 checksums to `<output-stem>.checksums.sha256` and records that exact filename in the generated run README.
 
 # Getting Started (common)
 In order to download `GetPheno`, you should clone this repository via the commands
@@ -11,7 +22,7 @@ git clone https://github.com/MischaLundberg/GetPheno
 cd GetPheno
 ```
 
-In order to install the Python dependencies, you will need the [Anaconda](https://store.continuum.io/cshop/anaconda/) Python distribution and package manager. After installing Anaconda, run the following commands to create an environment with the dependencies:
+In order to install the Python dependencies, you will need the [Anaconda](https://www.anaconda.com/) Python distribution and package manager. After installing Anaconda, run the following commands to create an environment with the dependencies:
 
 ```
 conda env create --file environment.yml
@@ -21,8 +32,8 @@ conda activate GetPheno
 #conda deactivate
 ```
 
-In case you are updating your current version of the pipeline, it would be best practice to also update your environment to the updated prerequisetes.
-If you are using a Anaconda environment, you can do so by typing
+In case you are updating your current version of the pipeline, it is best practice to also update your environment to the updated prerequisites.
+If you are using an Anaconda environment, you can do so by typing
 ```
 conda env update --name GetPheno --file environment.yml
 ```
@@ -35,35 +46,40 @@ If you receive any errors while running scripts of the GetPheno pipeline, please
 
 
 ### Input:
-As Input you need a file that contains a header, followed by your diagnostic codes of interest (one per row).
+As input you need a file that contains a header, followed by your diagnostic codes of interest (one per row).
 ```
 diagnosis
 F33.0
 F32.0
 ```
-alternatively, you can also specify multiple phenotypes in one run, for which you will write in the first column the name and in the second comma separated (without spaces inbetween) the codes. The columns are to be tab separated. Simillar to the above coding, it can be a mix of different diagnostic classifications (i.e., ICD10 and ICD8).
+Alternatively, you can specify multiple phenotypes in one run. Put the phenotype name in the first column and comma-separated codes in the second column. The columns must be tab-separated. Codes can mix diagnostic classifications, for example ICD10 and ICD8.
 ```
-MDD  F33.0,F32.0
-SCZ  F20,295.3
-BPD  F30
+MDD	ICD10:F33.0,ICD10:F32.0
+SCZ	ICD10:F20,ICD8:295.3
+BPD	ICD10:F30
 ```
-Don't forget to specify your header --gcol (will be otherwise set automatically to diagnosis or c_adiag depending on the cluster; see below) 
+
+Per-phenotype output columns are named after the requested phenotype, for example `MDD`, `SCZ`, and `BPD`, and contain `Case` or `Control`.
+
+Don't forget to specify your header `--gcol` if it differs from the default. It is otherwise set automatically to `diagnosis` or `c_adiag` depending on the cluster.
 
 A Simple run would look like
 
 ```
 ./get_pheno.py -g diagnosis.request -o diagnosis.casecontrol
 ```
-Keep in mind, that there may be some crucial flags to set: i.e. --eM
+Keep in mind that there may be crucial flags to set, for example `--eM`.
 The script will (if not told differently) update the ICD codes from i.e. F32.0 to ICD10:DF320 automatically on CHB/DBDS and IBP clusters.
 
-We offer now also the option of using a get_pheno.ini file. This allows to run it with the same base settings every time. get_pheno.py will use the get_pheno.ini, which is (1) in the local directory, from which you start it, or (2) in the directory, in which get_pheno.py is located. In every case, manually set flags will superseed the settings in the get_pheno.ini file (see an example .
+Without `--eM`, code requests are prefix matches. For example, `ICD8:296.2` also matches subcodes such as `ICD8:296.29` after normalization. With `--eM`, matching is exact unless a code explicitly ends in `*`, for example `ICD8:300.4*`.
+
+We also support a `get_pheno.ini` file. This allows running with the same base settings every time. `get_pheno.py` will use the `get_pheno.ini` in (1) the current working directory or (2) the directory where `get_pheno.py` is located. Manually set flags supersede settings in `get_pheno.ini`.
 
 ### Options (Flags):
 ```
 usage: get_pheno.py [-h] [--ini INI] -g G -o O [-f F] [--f2 F2] [--atc ATC] [-i I] [-j J] [--ge GE] [--qced QCED] [--name NAME] [--fcol FCOL] [--gcol GCOL] [--iidcol IIDCOL] [--bdcol BDCOL] [--sexcol SEXCOL] [--atccol ATCCOL] [--atcdatecol ATCDATECOL] [--fsep FSEP] [--gsep GSEP] [--ophsep OPHSEP] [--din DIN] [--don DON] [--recnum RECNUM] [--recnum2 RECNUM2] [--f2col F2COL] [--ExDepExc] [--eM]
-                                [--noLeadingICD] [--ICDCM] [--iidstatus IIDSTATUS] [--DiagTypeExclusions DIAGTYPEEXCLUSIONS] [--DiagTypeInclusions DIAGTYPEINCLUSIONS] [--LifetimeExclusion LIFETIMEEXCLUSION] [--PostExclusion POSTEXCLUSION] [--OneyPriorExclusion ONEYPRIOREXCLUSION] [--fDates FDATES] [--iDates IDATES] [--atcDates ATCDATES] [--DateFormat DATEFORMAT] [--MinMaxAge MINMAXAGE] [--Fyob FYOB]
-                                [--Fgender FGENDER] [--eCc] [--removePointInDiagCode] [--skipICDUpdate] [--MatchFI] [--BuildEntryExitDates] [--Ophold OPHOLD] [--BuildOphold] [--RegisterRun] [--lpp] [--write_pickle] [--write_fastGWA_format] [--write_Plink2_format] [--BuildTestSet] [--testRun] [--nthreads NTHREADS] [--lowmem] [--batchsize BATCHSIZE] [--PSYK] [--LPR] [--verbose]
+                                [--noLeadingICD] [--ICDCM] [--ICD8] [--ICD9] [--ICD10] [--iidstatus IIDSTATUS] [--DiagTypeExclusions DIAGTYPEEXCLUSIONS] [--DiagTypeInclusions DIAGTYPEINCLUSIONS] [--LifetimeExclusion LIFETIMEEXCLUSION] [--PostExclusion POSTEXCLUSION] [--OneyPriorExclusion ONEYPRIOREXCLUSION] [--fDates FDATES] [--iDates IDATES] [--atcDates ATCDATES] [--DateFormat DATEFORMAT] [--MinMaxAge MINMAXAGE] [--Fyob FYOB]
+                                [--Fgender FGENDER] [--eCc] [--removePointInDiagCode] [--skipICDUpdate] [--MatchFI] [--BuildEntryExitDates] [--Ophold OPHOLD] [--BuildOphold] [--RegisterRun] [--lpp] [--write_pickle] [--write_fastGWA_format] [--write_Plink2_format] [--BuildTestSet] [--testRun] [--nthreads NTHREADS] [--lowmem] [--verylowmem] [--batchsize BATCHSIZE] [--PSYK] [--LPR] [--BuildIndex] [--IndexDtypes INDEXDTYPES] [--verbose]
 
 Extracts a Phenotype from input files based on IIDs and diagnostic codes. The best way to start, is to generate a test dataset: 'python get_phenotype.py -g "" -o ./ --BuildTestSet' and then run 'python get_phenotype.py -g "" -o testrun.tsv --eM --ExDepExc --testRun'
 
@@ -98,9 +114,12 @@ optional arguments:
   --recnum2 RECNUM2     Columname of the recnum field in -f files. Default: "" (or 'recnum' on NCRR)
   --f2col F2COL         Columname of first diagnosis date. e.g. 'd_uddto' or 'date_out'. Default: "c_adiag" (or 'date_out' in CHB/DBDS)
   --ExDepExc            List of diagnostic codes to exclude (e.g. Cases holding also these codes will be excluded). This is currently precoded and will be changed to allowing to specify a file with codes.
-  --eM                  Exact Match. If the ICD or diagnosis code should max exactly and not e.g. searching for ICD:F33 and receiving ICD:F331, ICD:F33, ICD:F339 and so on.
+  --eM                  Exact Match. Codes without trailing * must match exactly. Codes with trailing * remain prefix matches.
   --noLeadingICD        Set this, if your diagnostic codes in "-g" do have a leading ICD*:, but your "-f" does not. This will only take affect together with --ExDepExc.
   --ICDCM               Set this, if your Cohort is based on ICD10/9-CM codes and not base WHO. This will only take affect together with --ExDepExc.
+  --ICD8                Restrict phenotype export to ICD8 codes.
+  --ICD9                Restrict phenotype export to ICD9/ICD9-CM codes.
+  --ICD10               Restrict phenotype export to ICD10/ICD10-CM codes.
   --iidstatus IIDSTATUS
                         Information about the status of the IID, i.e. if they withdrew their consent (), moved outside the country (), or died (). Default: ""
   --DiagTypeExclusions DIAGTYPEEXCLUSIONS
@@ -144,9 +163,12 @@ optional arguments:
   --BuildTestSet        Build the test set that can be used to see an example of the input data or to test if your setup runs smoothly
   --testRun             Run only on smaller test data input (only available for the test dataset)
   --nthreads NTHREADS   DEPRECATED! - How many threads should be used. Default: "8"
-  --lowmem              Experimental! - This will devide the LPR file into groups of each 100.000 individuals, run the phenotype on them, save it to file and then run the nex 100k until the end. This will increase the runtime.
+  --lowmem              Experimental! - Processes plaintext input in IID batches and appends each batch to one output file using a fixed precomputed output schema. For HDF5 input, use --verylowmem for batched extraction.
   --batchsize BATCHSIZE
                         Experimental! - This will set the batches (when --lowmem is set) to the desired value. Default: "100000"
+  --verylowmem          Experimental! - Applies low-memory batching to HDF5-indexed input.
+  --BuildIndex          Build an indexed HDF5 file for faster repeated low-memory runs.
+  --IndexDtypes         JSON dtype mapping used while building HDF5 indexes.
   --PSYK                Experimental! - To run only based on the PSYK diagnoses.
   --LPR                 Experimental! - To run only based on the LPR diagnoses.
   --verbose             Verbose output
@@ -167,6 +189,19 @@ optional arguments:
 |sex|Gender|
 |birthdate|Birthdate|
 |Age_FirstDx|Age at first diagnosis|
+
+When multiple phenotypes are requested, each phenotype gets its own status and detail columns:
+
+|Column|Explanation|
+| ------------- | ------------- |
+|PhenoName|Case/Control status for that phenotype|
+|PhenoName_Codes|Codes identified for that phenotype|
+|PhenoName_In_Dates|Input dates for the corresponding phenotype codes|
+|PhenoName_Out_Dates|Output dates for the corresponding phenotype codes|
+|PhenoName_earliest_date|Earliest date identified for that phenotype|
+|PhenoName_latest_date|Latest date identified for that phenotype|
+|PhenoName_n_diags|Number of diagnoses identified for that phenotype|
+|PhenoName_n_unique_in_days|Number of unique diagnosis days for that phenotype|
 
 ### Additional output in file based on Covariate or ExDEP settings:
 |Column|Explanation|
@@ -195,3 +230,13 @@ optional arguments:
 |Level3_Sankey_source|Sankey information, otherwise not needed (for plots)|
 |Level3_Sankey_target|Sankey information, otherwise not needed (for plots)|
 |Level3_Sankey_value|Sankey information, otherwise not needed (for plots)|
+
+### Output ordering and integrity files
+
+The output columns start with the columns from the STAM/input IID file (`-i`), followed by optional additional IID information (`-j`), phenotype columns, exclusion/covariate columns, and derived output fields.
+
+Each run writes a checksum file named `<output-stem>.checksums.sha256`. The generated run README contains the matching command:
+
+```
+sha256sum -c ./<output-stem>.checksums.sha256
+```

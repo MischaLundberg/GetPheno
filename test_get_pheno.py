@@ -1,19 +1,12 @@
 
-import sys
-#sys.path.append("/Users/mischa/Desktop")
-
-import os
-import io
-import uuid
-import tempfile
 import subprocess
+import hashlib
 import pandas as pd
 import numpy as np
-import types
 import pytest
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 
-import get_pheno_refactored_new as gp
+import get_pheno as gp
 
 # Ensure globals are set to safe defaults for tests
 gp.only_ICD10 = False
@@ -47,16 +40,10 @@ def test_remove_leading_icd_and_format_numeric():
     assert res == "012.30"
 
 
-def test_split_and_format_various():
-    # numeric input returns string
-    assert gp.split_and_format(123) == "123"
-    assert gp.split_and_format("456") == "456"
-    # ICD-like string
-    assert gp.split_and_format("F32.1") == "F321"
-    # with fill -> ensure padded to 4
-    assert gp.split_and_format("F32.1", fill=True) == "F3210"
-    # Non-matching string returns itself
-    assert gp.split_and_format("XYZ") == "XYZ"
+def test_normalize_atc_codes_preserves_prefix_and_wildcards():
+    assert gp.normalize_atc_codes(["atc:n06a*", " n05 "], expect_prefix=None) == ["ATC:N06A*", "N05"]
+    assert gp.normalize_atc_codes(["n06a"], expect_prefix=True) == ["ATC:N06A"]
+    assert gp.normalize_atc_codes(["ATC:N06A"], expect_prefix=False) == ["N06A"]
 
 
 def test__to_datetime_series_and_convert_if_not_datetime(tmp_path):
@@ -94,8 +81,8 @@ def test_normalize_iid_series_and_auto():
     assert out2.dtype.name == "string" or out2.dtype.name == "object"
     # auto chooses Int64 if all numeric
     s2 = pd.Series(["10", "20.0", "30"])
-    auto = gp.normalize_iid_series_auto(s2)
-    assert getattr(auto.dtype, "name", "") in ("Int64", "int64", "Int64") or pd.api.types.is_integer_dtype(auto)
+    auto = gp.normalize_iid_series(s2, target="int")
+    assert getattr(auto.dtype, "name", "") in ("Int64", "int64") or pd.api.types.is_integer_dtype(auto)
 
 
 def test_convert_if_not_datetime_various():
@@ -130,9 +117,10 @@ def test_setup_logger_and_usage(monkeypatch, tmp_path):
 
 
 def test_expand_ranges():
-    assert gp.expand_ranges(["T36-T38,T40-T42,T45"]) == ["T36", "T37", "T38", "T40", "T41", "T42", "T45"]
+    assert gp.expand_ranges("T36-T38,T40-T42,T45") == ["T36", "T37", "T38", "T40", "T41", "T42", "T45"]
     assert gp.expand_ranges(["T36-T38"]) == ["T36", "T37", "T38"]
     assert gp.expand_ranges(["36-38"]) == ["36", "37", "38"]
+    assert gp.expand_ranges("ICD10:T36-T38") == ["ICD10:T36", "ICD10:T37", "ICD10:T38"]
     assert gp.expand_ranges(["X20"]) == ["X20"]
 
 
@@ -147,6 +135,60 @@ def test_update_icd_coding_and_process_entry(monkeypatch):
     # numeric entry interpreted as ICD8 formatting when mode in DK_clusters; test with integer input
     res = gp.process_entry(123, remove_leading=False, eM=False, mode="CHB_DBDS", icdprefix="", remove_point=False, ICDCM=False)
     assert isinstance(res, str)
+
+
+def test_icd8_non_exact_short_code_is_as_inclusive_as_explicit_subcodes(monkeypatch):
+    monkeypatch.setattr(gp, "cluster_run", "CHB_DBDS")
+    monkeypatch.setattr(gp, "only_ICD10", False)
+    monkeypatch.setattr(gp, "only_ICD9", False)
+    monkeypatch.setattr(gp, "only_ICD8", False)
+
+    short_codes = gp.update_icd_coding(
+        ["ICD8:296.2", "ICD8:298.0", "ICD8:300.4"],
+        eM=False,
+        remove_point_in_diag_request=True,
+        noLeadingICD=True,
+    )
+    long_codes = gp.update_icd_coding(
+        ["ICD8:296.2", "ICD8:296.29", "ICD8:298.0", "ICD8:298.09", "ICD8:300.4", "ICD8:300.49"],
+        eM=False,
+        remove_point_in_diag_request=True,
+        noLeadingICD=True,
+    )
+
+    df = pd.DataFrame({
+        "iid": ["a", "b", "c", "d", "e", "f"],
+        "diagnosis": ["29620", "29629", "29800", "29809", "30040", "30049"],
+    })
+
+    short_hits = gp.map_cases(short_codes, exact_match=False, df1=df, diagcol="diagnosis")
+    long_hits = gp.map_cases(long_codes, exact_match=False, df1=df, diagcol="diagnosis")
+
+    assert short_codes == ["2962", "2980", "3004"]
+    assert set(short_hits["iid"]) == set(long_hits["iid"])
+
+
+def test_icd8_wildcard_remains_prefix_match_even_with_exact_match(monkeypatch):
+    monkeypatch.setattr(gp, "cluster_run", "CHB_DBDS")
+    monkeypatch.setattr(gp, "only_ICD10", False)
+    monkeypatch.setattr(gp, "only_ICD9", False)
+    monkeypatch.setattr(gp, "only_ICD8", False)
+
+    codes = gp.update_icd_coding(
+        ["ICD8:300.4*"],
+        eM=True,
+        remove_point_in_diag_request=True,
+        noLeadingICD=True,
+    )
+    df = pd.DataFrame({
+        "iid": ["a", "b", "c"],
+        "diagnosis": ["30040", "30049", "30050"],
+    })
+
+    hits = gp.map_cases(codes, exact_match=True, df1=df, diagcol="diagnosis")
+
+    assert codes == ["3004*"]
+    assert set(hits["iid"]) == {"a", "b"}
 
 
 def test_dict_update_icd_coding_basic():
@@ -248,12 +290,12 @@ def test_get_h5_cases_integration(tmp_path):
     assert isinstance(out, pd.DataFrame)
 
 
-def test_load_stam_file_and_finalize(tmp_path):
+def test_load_data_file_and_finalize(tmp_path):
     # create a small csv
     csvp = tmp_path / "stam.csv"
     df = pd.DataFrame({"pnr": [1, 2], "birthdate": ["01/01/1980", "02/02/1990"], "diagnosis": ["ICD10:F32", "ICD10:F33"], "sex": ["M", "F"]})
     df.to_csv(csvp, index=False)
-    res = gp.load_stam_file(stam_file=str(csvp), isep=",", birthdatecol="birthdate", diagnostic_col="diagnosis", sexcol="sex", stam_cols_to_read_as_date=["birthdate"])
+    res = gp.load_data_file(data_file=str(csvp), sep=",", birthdatecol="birthdate", diagnostic_col="diagnosis", sexcol="sex", stam_cols_to_read_as_date=["birthdate"])
     assert "birthdate" in res.columns
     # finalize_lpr_data should rename columns accordingly
     df2 = pd.DataFrame({"c_adiag": ["A"], "d_inddto": [pd.Timestamp("2020-01-01")]})
@@ -267,13 +309,14 @@ def test_build_temp_file_and_load_mapping_rows(monkeypatch, tmp_path):
     df = pd.DataFrame({"id": [f"id{i}" for i in range(10)], "v": list(range(10))})
     df.to_csv(csvp, index=False)
     # load_mapping_rows should identify row indices
-    rows = gp.load_mapping_rows(str(csvp), iidcol="id", target_iids=["id1", "id3"], fsep=",")
+    rows = gp.load_mapping_rows(str(csvp), iidcol="id", target_iids=["id1", "id3"], sep=",")
     assert isinstance(rows, list)
     # Monkeypatch subprocess.run used in build_temp_file to avoid awk on system
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: None)
     # call build_temp_file with the indices from load_mapping_rows
     tempf = tmp_path / "filtered_temp.csv"
-    gp.build_temp_file(str(csvp), [1, 3], temp_file=str(tempf), verbose=True)
+    index_file = tmp_path / "row_indices.txt"
+    gp.build_temp_file(str(csvp), [1, 3], temp_file=str(tempf), index_file=str(index_file), verbose=True)
     # Because we monkeypatched subprocess.run, file may not be created; ensure the function ran without exception
 
 
@@ -329,7 +372,7 @@ def test_update_DxDates_multi_exclusion_basic():
 
 def create_test_h5(tmp_path):
     """Helper to create test HDF5 store with known data"""
-    h5path = tmp_path + "/test.h5"
+    h5path = str(tmp_path / "test.h5")
     
     # Create test data with various formats
     df = pd.DataFrame({
@@ -359,7 +402,6 @@ def test_select_by_iid_and_diag_basic(tmp_path):
         diags=['ICD10:F32'],
         prefix_all=False
     )
-    print(result)
     # Should find all rows with exactly ICD10:F32
     assert len(result) == 2
     assert all(d == 'ICD10:F32' for d in result['diagnosis'])
@@ -379,7 +421,6 @@ def test_select_by_iid_and_diag_prefix(tmp_path):
         prefix_all=True  # Enable prefix matching
     )
     
-    print(result)
     # Should find all F32* codes
     assert len(result) == 4
     assert all(d.startswith('ICD10:F32') for d in result['diagnosis'])
@@ -399,7 +440,6 @@ def test_select_by_iid_and_diag_combined(tmp_path):
         prefix_all=True
     )
     
-    print(result)
     # Should find F32* codes only for IIDs 1 and 2
     assert len(result) == 2
     assert all(i in ['1', '2'] for i in result['iid'])
@@ -420,7 +460,6 @@ def test_select_by_iid_and_diag_numeric_iids(tmp_path):
         prefix_all=False
     )
     
-    print(result)
     assert len(result) > 0
     assert all(int(i) in [1, 2] for i in result['iid'])
 
@@ -439,11 +478,164 @@ def test_select_by_iid_and_diag_empty_results(tmp_path):
         prefix_all=False
     )
     
-    print(result)
     assert len(result) == 0
     assert 'iid' in result.columns
     assert 'diagnosis' in result.columns
+
+
+def test_preflight_input_files_reads_headers_and_reports_missing(tmp_path):
+    stam = tmp_path / "stam.tsv"
+    stam.write_text("iid\tbirthdate\tsex\n1\t2000-01-01\tF\n", encoding="utf-8")
+
+    headers = gp.preflight_input_files([
+        ("stam", str(stam), "\t", True),
+        ("optional", "", "\t", False),
+    ])
+
+    assert headers["stam"][0]["columns"] == ["iid", "birthdate", "sex"]
+    assert headers["optional"] == []
+
+    with pytest.raises(FileNotFoundError):
+        gp.preflight_input_files([("missing", str(tmp_path / "missing.tsv"), "\t", True)])
+
+
+def test_contains_atc_codes_detects_nested_main_and_exclusion_values(tmp_path):
+    exclusion_file = tmp_path / "exclusions.tsv"
+    exclusion_file.write_text("Disorder\tDisorder Codes\nAUD\tICD10:F10\nMED\tmain=ATC:N06A;sub=ICD10:F32\n", encoding="utf-8")
+
+    assert gp.contains_atc_codes(pd.Series(["ICD10:F32", "ATC:N06A"]))
+    assert gp.contains_atc_codes(pd.DataFrame({"Disorder Codes": ["ICD10:F32", "main=ATC:N05;sub=F10"]}))
+    assert gp.file_contains_atc_codes(str(exclusion_file))
+    assert not gp.contains_atc_codes(["ICD10:F32", "ICD9:303"])
+
+
+def test_batch_helpers_limit_every_frame_to_current_iid_universe():
+    df3 = pd.DataFrame({"iid": ["1", "2.0", "3", "4"], "birthdate": pd.to_datetime(["2000-01-01"] * 4)})
+    df1 = pd.DataFrame({"iid": ["1", "2", "2", "5"], "diagnosis": ["A", "B", "C", "D"]})
+
+    normalized_df3, iid_list, batch_size, num_batches = gp.prepare_iid_batches(df3, "iid", 2)
+    assert normalized_df3["iid"].tolist() == ["1", "2", "3", "4"]
+    assert iid_list == ["1", "2", "3", "4"]
+    assert batch_size == 2
+    assert num_batches == 2
+
+    batch = iid_list[:2]
+    assert gp.subset_to_iid_batch(df1, "iid", batch)["iid"].tolist() == ["1", "2", "2"]
+
+    unique_df3 = gp.enforce_iid_universe(df3, "iid", batch, frame_name="df3", unique_iids=True)
+    assert unique_df3["iid"].tolist() == ["1", "2"]
+
+
+def test_fill_casecontrol_status_columns_marks_missing_phenotype_values_as_controls():
+    df = pd.DataFrame({
+        "iid": ["1", "2", "3"],
+        "MDD": ["Case", np.nan, ""],
+        "OCD": [np.nan, "Case", ""],
+        "MDD_Codes": ["F32", "", ""],
+    })
+
+    out = gp.fill_casecontrol_status_columns(df, ["MDD", "OCD", "BPD"])
+
+    assert out["MDD"].tolist() == ["Case", "Control", "Control"]
+    assert out["OCD"].tolist() == ["Control", "Case", "Control"]
+    assert out["BPD"].tolist() == ["Control", "Control", "Control"]
+    assert out["MDD_Codes"].tolist() == ["F32", "", ""]
+
+
+def test_expected_output_schema_uses_stam_first_and_source_specific_columns():
+    pheno = pd.DataFrame({
+        "Disorder": ["AUD", "MED", "MIXED"],
+        "Disorder Codes": ["ICD10:F10", "ATC:N06A", "ICD10:F32,ATC:N05"],
+    })
+    lifetime = pd.DataFrame({"Disorder": ["EXC"], "Disorder Codes": ["ATC:N07"]})
+
+    cols = gp.build_expected_output_columns(
+        iidcol="iid",
+        df3_columns=["iid", "birthdate", "sex"],
+        df4_columns=["extra_info"],
+        in_pheno_codes=pheno,
+        lifetime_exclusions=lifetime,
+        oneYearPrior_exclusions=pd.DataFrame(),
+        post_exclusions=pd.DataFrame(),
+        covariates=pd.DataFrame(),
+        cluster_run="CHB_DBDS",
+        ctype_col="",
+        sexcol="sex",
+        main_pheno_name="MainPheno",
+    )
+
+    assert cols[:4] == ["iid", "birthdate", "sex", "extra_info"]
+    assert cols.index("diagnosis") < cols.index("AUD")
+    assert "AUD_admissiontype" in cols
+    assert "AUD_apk" not in cols
+    assert "MED_apk" in cols
+    assert "MED_admissiontype" not in cols
+    assert "MIXED_admissiontype" in cols
+    assert "MIXED_apk" in cols
+    assert "EXC_apk" in cols
+
+
+def test_coalesce_suffixed_columns_prefers_new_merge_values():
+    df = pd.DataFrame({
+        "iid": ["1", "2"],
+        "sex_x": ["old", "old"],
+        "sex_y": ["F", None],
+        "birthdate": [None, "1990-01-01"],
+        "birthdate_y": ["2000-01-01", "1990-01-01"],
+    })
+
+    out = gp.coalesce_suffixed_columns(df, ["sex", "birthdate"])
+
+    assert out["sex"].tolist() == ["F", None]
+    assert out["birthdate"].tolist() == ["2000-01-01", "1990-01-01"]
+    assert "sex_x" not in out.columns
+    assert "sex_y" not in out.columns
+    assert "birthdate_y" not in out.columns
+
+
+def test_fillna_blank_and_sanitize_tsv_cells_handle_arrays_and_newlines():
+    df = pd.DataFrame({
+        "text": ["a\tb", "c\nd", None],
+        "items": [["x", "y\nz"], np.array(["a\tb"]), None],
+        "num": [1.0, np.nan, 3.0],
+    })
+
+    filled = gp.fillna_blank(df)
+    assert filled.loc[2, "text"] == ""
+    assert filled.loc[1, "num"] == ""
+
+    sanitized = gp.sanitize_tsv_cells(df)
+    assert sanitized.loc[0, "text"] == "a b"
+    assert sanitized.loc[1, "text"] == "c d"
+    assert "\n" not in sanitized.loc[1, "items"]
+    assert "\t" not in sanitized.loc[0, "items"]
+
+
+def test_checksum_file_is_nonempty_and_uses_sha256_format(tmp_path):
+    output = tmp_path / "result.tsv"
+    output.write_text("iid\tdiagnosis\n1\tCase\n", encoding="utf-8")
+    fgwa = tmp_path / "result.tsv.fgwa.pheno"
+    fgwa.write_text("FID\tIID\tCaseControl\n1\t1\t1\n", encoding="utf-8")
+
+    checksum_file = gp.checksum_path_for_output(str(output))
+    targets = gp.collect_existing_checksum_targets(str(output), write_fastGWA_format=True)
+    gp.write_checksum_file(targets, checksum_file)
+
+    lines = (tmp_path / "result.checksums.sha256").read_text(encoding="utf-8").splitlines()
+    expected_digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    assert lines
+    assert lines[0] == f"{expected_digest}  result.tsv"
+    assert any(line.endswith("  result.tsv.fgwa.pheno") for line in lines)
+
+
+def test_generate_readme_uses_actual_checksum_file_name():
+    readme = gp.generate_readme(
+        flags_used="-g: file pheno.tsv\n--iidcol: value IID\n--sexcol: value sex\n--bdcol: value birthdate\n--iidstatus: value \n--iidstatusdate: value ",
+        default_args="",
+        checksum_file="result.checksums.sha256",
+    )
+
+    assert "sha256sum -c ./result.checksums.sha256" in readme
+    assert "sha256sum -c ./checksums.sha256" not in readme
 # Note: main() and other CLI/integration-heavy functions are not invoked here.
 # The tests above exercise logic-heavy code paths and ensure basic functionality.
-
-

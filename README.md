@@ -1,4 +1,4 @@
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.14932834.svg)](https://doi.org/10.5281/zenodo.14932834)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21902133.svg)](https://doi.org/10.5281/zenodo.21902133)
 
 # GetPheno
 [Build Phenotypes](#1-build-phenotypes)

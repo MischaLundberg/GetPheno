@@ -542,6 +542,28 @@ def test_fill_casecontrol_status_columns_marks_missing_phenotype_values_as_contr
     assert out["MDD_Codes"].tolist() == ["F32", "", ""]
 
 
+def test_cohort_membership_mask_supports_new_chb_and_old_degen_columns():
+    df = pd.DataFrame({
+        "iid": ["1", "2", "3", "4", "5"],
+        "chb": ["TRUE", "FALSE", "", np.nan, "0"],
+        "degen": ["FALSE", "TRUE", "", "", ""],
+        "degen_new": ["FALSE", "FALSE", "TRUE", "", ""],
+        "degen_old": ["FALSE", "FALSE", "FALSE", "1", ""],
+    })
+
+    mask = gp.cohort_membership_mask(df, ["chb", "degen", "degen_new", "degen_old"])
+
+    assert mask.tolist() == [True, True, True, True, False]
+
+
+def test_add_chb_degen_compat_columns_aliases_new_and_old_names():
+    chb_only = gp.add_chb_degen_compat_columns(pd.DataFrame({"chb": ["TRUE", "FALSE"]}))
+    degen_only = gp.add_chb_degen_compat_columns(pd.DataFrame({"degen": ["TRUE", "FALSE"]}))
+
+    assert chb_only["degen"].tolist() == ["TRUE", "FALSE"]
+    assert degen_only["chb"].tolist() == ["TRUE", "FALSE"]
+
+
 def test_expected_output_schema_uses_stam_first_and_source_specific_columns():
     pheno = pd.DataFrame({
         "Disorder": ["AUD", "MED", "MIXED"],

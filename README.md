@@ -7,6 +7,7 @@
 
 - Builds one or multiple phenotypes in one run from ICD8, ICD9, ICD10, ICD9-CM, ICD10-CM, and ATC code requests.
 - Supports tab-separated multi-phenotype request files with one phenotype name per row and comma-separated codes per phenotype.
+- Supports advanced phenotype definitions with `main=`, `sub=`, `rule_out=`, code ranges, and explicit wildcard codes.
 - By default, diagnostic requests are matched as prefixes. Use `--eM` for exact matching; a trailing `*` always keeps that code prefix-based, also when `--eM` is used.
 - Supports lifetime, one-year-prior, and post-onset exclusion files, including ATC-based exclusions.
 - Supports `--lowmem` and `--verylowmem` batching with fixed output columns across batches, so appended TSV output keeps a stable schema.
@@ -60,6 +61,15 @@ BPD	ICD10:F30
 ```
 
 Per-phenotype output columns are named after the requested phenotype, for example `MDD`, `SCZ`, and `BPD`, and contain `Case` or `Control`.
+
+Advanced phenotype definitions can be used in the second column when a phenotype needs rule logic instead of a plain code list. Separate rule clauses with `;` and codes within a clause with `,`.
+```
+MD	main=ICD10:F32;rule_out=ICD10:F25
+Recurrent_MD	main=ICD10:F33;sub=ICD10:F10,ICD10:F11;rule_out=ICD10:F25
+Poisoning_Attempt	main=ICD10:F;sub=ICD10:T36-ICD10:T50,ICD10:T52-ICD10:T60
+```
+
+`main=` defines the main diagnosis codes for candidate cases. `sub=` defines supporting/secondary diagnosis codes. `rule_out=` removes IIDs with matching codes from that advanced phenotype case set. Code ranges such as `ICD10:T36-ICD10:T50` are expanded automatically. A trailing `*`, for example `ICD10:F32*`, keeps that code prefix-based even when `--eM` is used.
 
 Don't forget to specify your header `--gcol` if it differs from the default. It is otherwise set automatically to `diagnosis` or `c_adiag` depending on the cluster.
 

@@ -2,3 +2,4 @@
 misc/
 .vscode/
 .continue/
+__pycache__/

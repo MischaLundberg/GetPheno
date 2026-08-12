@@ -8,7 +8,7 @@
 - Builds one or multiple phenotypes in one run from ICD8, ICD9, ICD10, ICD9-CM, ICD10-CM, and ATC code requests.
 - Supports tab-separated multi-phenotype request files with one phenotype name per row and comma-separated codes per phenotype.
 - Supports advanced phenotype definitions with `main=`, `sub=`, `rule_out=`, code ranges, and explicit wildcard codes.
-- By default, diagnostic requests are matched as prefixes. Use `--eM` for exact matching; a trailing `*` always keeps that code prefix-based, also when `--eM` is used.
+- Diagnostic requests may always include trailing `*`. By default, all requested codes are matched as prefixes; with `--eM`, only codes ending in `*` remain prefix matches and all other codes are exact.
 - Supports lifetime, one-year-prior, and post-onset exclusion files, including ATC-based exclusions.
 - Supports `--lowmem` and `--verylowmem` batching with fixed output columns across batches, so appended TSV output keeps a stable schema.
 - Restricts each batch to the current STAM/IID universe and applies QC (`--qced`) and general exclusions before case/control output is finalized.
@@ -69,7 +69,7 @@ Recurrent_MD	main=ICD10:F33;sub=ICD10:F10,ICD10:F11;rule_out=ICD10:F25
 Poisoning_Attempt	main=ICD10:F;sub=ICD10:T36-ICD10:T50,ICD10:T52-ICD10:T60
 ```
 
-`main=` defines the main diagnosis codes for candidate cases. `sub=` defines supporting/secondary diagnosis codes. `rule_out=` removes IIDs with matching codes from that advanced phenotype case set. Code ranges such as `ICD10:T36-ICD10:T50` are expanded automatically. A trailing `*`, for example `ICD10:F32*`, keeps that code prefix-based even when `--eM` is used.
+`main=` defines the main diagnosis codes for candidate cases. `sub=` defines supporting/secondary diagnosis codes. `rule_out=` removes IIDs with matching codes from that advanced phenotype case set. Code ranges such as `ICD10:T36-ICD10:T50` are expanded automatically before matching. A trailing `*`, for example `ICD10:F32*`, keeps that code prefix-based whether or not `--eM` is used.
 
 Don't forget to specify your header `--gcol` if it differs from the default. It is otherwise set automatically to `diagnosis` or `c_adiag` depending on the cluster.
 
@@ -81,7 +81,11 @@ A Simple run would look like
 Keep in mind that there may be crucial flags to set, for example `--eM`.
 The script will (if not told differently) update the ICD codes from i.e. F32.0 to ICD10:DF320 automatically on CHB/DBDS and IBP clusters.
 
-Without `--eM`, code requests are prefix matches. For example, `ICD8:296.2` also matches subcodes such as `ICD8:296.29` after normalization. With `--eM`, matching is exact unless a code explicitly ends in `*`, for example `ICD8:300.4*`.
+Without `--eM`, all code requests are prefix matches. Operationally, this is equivalent to adding a trailing `*` to every requested code after ICD/ATC normalization, even if the user did not write `*`. `F25*,F33*,F32.2` is therefore interpreted as `F25*`, `F33*`, and `F32.2*`: it matches codes starting with `F25`, codes starting with `F33`, and codes starting with `F32.2`. For example, `ICD8:296.2` also matches subcodes such as `ICD8:296.29` after normalization.
+
+With `--eM`, codes without trailing `*` are exact matches, while codes with trailing `*` stay prefix matches. `F25*,F33*,F32.2` is interpreted as `F25*`, `F33*`, and exact `F32.2`: it matches codes starting with `F25`, codes starting with `F33`, and only the exact code `F32.2`.
+
+Ranges are expanded first and then matched using the same rules. For example, `ICD10:T36-ICD10:T38` becomes `ICD10:T36,ICD10:T37,ICD10:T38`. Without `--eM`, these expanded codes are prefix matches, so `ICD10:T360` would also match `ICD10:T36`. With `--eM`, the expanded codes are exact unless you explicitly write wildcard requests such as `ICD10:T36*,ICD10:T37*,ICD10:T38*`.
 
 We also support a `get_pheno.ini` file. This allows running with the same base settings every time. `get_pheno.py` will use the `get_pheno.ini` in (1) the current working directory or (2) the directory where `get_pheno.py` is located. Manually set flags supersede settings in `get_pheno.ini`.
 
@@ -192,8 +196,8 @@ optional arguments:
 |first_dx|Date of first Diagnosis|
 |last_dx|Date of last Diagnosis|
 |diagnoses|All diagnostic codes for this IID on the phenotype|
-|in_dates|All in_dates for the corresponding "diagnses"|
-|out_dates|All out_dates for the corresponding "diagnses"|
+|in_dates|All in_dates for the corresponding "diagnses" (Start of the current diagnosis; NOT INPATIENT DATE)|
+|out_dates|All out_dates for the corresponding "diagnses" (End of the current diagnosis; NOT OUTPATIENT DATE)|
 |n_diags|Number of diagnoses identified|
 |n_unique_in_days|Number of unique days of diagnoses|
 |sex|Gender|

@@ -28,6 +28,35 @@ def test_match_codes_exact_and_prefix():
     assert gp.match_codes(pd.Series(["ATC:N06A", "ATC:N06AB"]), ["ATC:N06A"], exact=False).tolist() == [True, True]
 
 
+def test_wildcards_are_allowed_with_and_without_exact_match():
+    df = pd.DataFrame({
+        "iid": ["a", "b", "c", "d", "e", "f"],
+        "diagnosis": ["F250", "F339", "F32.2", "F32.20", "F321", "G40"],
+    })
+    requested = ["F25*", "F33*", "F32.2"]
+
+    prefix_hits = gp.map_cases(requested, exact_match=False, df1=df, diagcol="diagnosis")
+    exact_hits = gp.map_cases(requested, exact_match=True, df1=df, diagcol="diagnosis")
+
+    assert set(prefix_hits["iid"]) == {"a", "b", "c", "d"}
+    assert set(exact_hits["iid"]) == {"a", "b", "c"}
+
+
+def test_expanded_ranges_follow_exact_match_mode():
+    df = pd.DataFrame({
+        "iid": ["a", "b", "c", "d", "e", "f"],
+        "diagnosis": ["ICD10:T36", "ICD10:T360", "ICD10:T37", "ICD10:T38", "ICD10:T380", "ICD10:T39"],
+    })
+    requested = gp.expand_ranges("ICD10:T36-ICD10:T38")
+
+    prefix_hits = gp.map_cases(requested, exact_match=False, df1=df, diagcol="diagnosis")
+    exact_hits = gp.map_cases(requested, exact_match=True, df1=df, diagcol="diagnosis")
+
+    assert requested == ["ICD10:T36", "ICD10:T37", "ICD10:T38"]
+    assert set(prefix_hits["iid"]) == {"a", "b", "c", "d", "e"}
+    assert set(exact_hits["iid"]) == {"a", "c", "d"}
+
+
 def test_remove_leading_icd_and_format_numeric():
     assert gp.remove_leading_icd("ICD10:F32") == "F32"
     assert gp.remove_leading_icd("ICD8:123.4") == "123.4"

@@ -1,6 +1,7 @@
 
 import subprocess
 import hashlib
+import warnings
 import pandas as pd
 import numpy as np
 import pytest
@@ -120,6 +121,204 @@ def test_convert_if_not_datetime_various():
     assert gp.convert_if_not_datetime("2000-01-02").date() == date(2000, 1, 2)
 
 
+def test_ipsych_cohort_restrictions_do_not_filter_on_parental_birthplace():
+    df = pd.DataFrame({
+        "iid": ["keep", "early", "end", "foreign", "no_mother", "not_age_one", "parents_foreign", "twin_a", "twin_b"],
+        "birthdate": [
+            "1981-05-01", "1981-04-30", "2009-01-01", "1990-01-01", "1990-01-01",
+            "1990-01-01", "1990-01-01", "1991-02-03", "1991-02-03",
+        ],
+        "fkode": [100, 100, 100, 6000, 100, 100, 100, 100, 100],
+        "pnr_m": ["m1", "m2", "m3", "m4", pd.NA, "m6", "m7", "twins", "twins"],
+        "stat": ["1", "1", "1", "1", "1", "2", "1", "1", "1"],
+        "statd": [
+            "1981-05-02", "1981-05-02", "2009-01-02", "1990-01-02", "1990-01-02",
+            "1990-04-01", "1990-01-02", "1991-02-04", "1991-02-04",
+        ],
+        "DKDK": [True, True, True, True, True, True, False, True, True],
+    })
+
+    result = gp.apply_ipsych_cohort_restrictions(
+        df,
+        iidcol="iid",
+        options={"enabled": True, "dk_parents_col": "DKDK"},
+    )
+
+    assert result["iid"].tolist() == ["keep", "parents_foreign"]
+    assert result.set_index("iid").loc["parents_foreign", "both_parents_DK"] == False
+
+
+def test_ipsych_cohort_warns_when_dkdk_indicator_is_unavailable(capsys):
+    df = pd.DataFrame({
+        "iid": ["keep"],
+        "birthdate": ["1990-01-01"],
+        "fkode": [100],
+        "pnr_m": ["m1"],
+        "stat": ["1"],
+        "statd": ["1990-01-02"],
+    })
+
+    result = gp.apply_ipsych_cohort_restrictions(
+        df,
+        iidcol="iid",
+        options={"enabled": True},
+    )
+
+    assert result["iid"].tolist() == ["keep"]
+    assert "Danish-born-parents (DKDK) indicator could not be reported" in capsys.readouterr().out
+
+
+def test_ipsych_restrictions_use_status_columns_from_additional_input(capsys):
+    stam = pd.DataFrame({
+        "iid": ["keep", "exclude"],
+        "birthdate": ["1990-01-01", "1990-01-01"],
+        "fkode": [100, 100],
+        "pnr_m": ["m1", "m2"],
+        "DKDK": [True, True],
+    })
+    additional = pd.DataFrame({
+        "iid": ["keep", "exclude"],
+        "status_code": ["1", "2"],
+        "status_date": ["1990-01-02", "1990-04-01"],
+    })
+
+    filtered_stam, filtered_additional = gp.restrict_ipsych_iid_inputs(
+        stam,
+        additional,
+        iidcol="iid",
+        birthdatecol="birthdate",
+        options={
+            "enabled": True,
+            "dk_parents_col": "DKDK",
+            "status_col": "status_code",
+            "status_date_col": "status_date",
+        },
+    )
+
+    assert filtered_stam["iid"].tolist() == ["keep"]
+    assert filtered_additional["iid"].tolist() == ["keep"]
+    assert "neither status column" not in capsys.readouterr().out
+
+
+def test_death_filters_support_age_range_living_and_deceased_modes():
+    metadata = pd.DataFrame({
+        "iid": ["young_death", "older_death", "alive"],
+        "birthdate": ["1980-01-01"] * 3,
+        "D_DODSDATO": ["2000-01-01", "2020-01-01", ""],
+    })
+
+    age_only = gp.apply_death_filters(
+        metadata,
+        deathdatecol="D_DODSDATO",
+        min_max_age_death="20,30",
+    )
+    age_and_alive = gp.apply_death_filters(
+        metadata,
+        deathdatecol="D_DODSDATO",
+        min_max_age_death="20,30",
+        keep_alive=True,
+    )
+    older_dead = gp.apply_death_filters(
+        metadata,
+        deathdatecol="D_DODSDATO",
+        min_max_age_death="30,50",
+        only_dead=True,
+    )
+
+    assert age_only["iid"].tolist() == ["young_death"]
+    assert age_and_alive["iid"].tolist() == ["young_death", "alive"]
+    assert older_dead["iid"].tolist() == ["older_death"]
+    assert age_and_alive.set_index("iid").loc["young_death", "AgeAtDeath"] == 20
+    assert pd.isna(age_and_alive.set_index("iid").loc["alive", "AgeAtDeath"])
+
+
+def test_death_filters_reject_conflicting_status_modes():
+    with pytest.raises(ValueError, match="cannot be enabled together"):
+        gp.apply_death_filters(
+            pd.DataFrame({
+                "birthdate": ["1980-01-01"],
+                "D_DODSDATO": ["2020-01-01"],
+            }),
+            deathdatecol="D_DODSDATO",
+            keep_alive=True,
+            only_dead=True,
+        )
+
+
+def test_ipsych_death_date_enforces_survival_to_first_birthday():
+    df = pd.DataFrame({
+        "iid": ["alive", "before_one", "on_first_birthday"],
+        "birthdate": ["1990-01-01"] * 3,
+        "D_DODSDATO": ["", "1990-12-31", "1991-01-01"],
+        "fkode": [100] * 3,
+        "pnr_m": ["m1", "m2", "m3"],
+        "stat": ["1", "1", "1"],
+        "DKDK": [True] * 3,
+    })
+
+    result = gp.apply_ipsych_cohort_restrictions(
+        df,
+        iidcol="iid",
+        options={
+            "enabled": True,
+            "dk_parents_col": "DKDK",
+            "deathdate_col": "D_DODSDATO",
+        },
+    )
+
+    assert result["iid"].tolist() == ["alive", "on_first_birthday"]
+
+
+def test_ipsych_status_only_does_not_require_death_date():
+    df = pd.DataFrame({
+        "iid": ["keep"],
+        "birthdate": ["1990-01-01"],
+        "fkode": [100],
+        "pnr_m": ["m1"],
+        "stat": ["1"],
+        "DKDK": [True],
+    })
+
+    result = gp.apply_ipsych_cohort_restrictions(
+        df,
+        iidcol="iid",
+        options={"enabled": True, "dk_parents_col": "DKDK"},
+    )
+
+    assert result["iid"].tolist() == ["keep"]
+
+
+def test_ipsych_diagnosis_window_uses_date_in_and_date_out_overlap():
+    df = pd.DataFrame({
+        "iid": ["starts_on_boundary", "crosses_end", "starts_at_end", "before_window", "undated"],
+        "date_in": ["2009-12-01", "2015-12-31", "2016-01-01", "2008-01-01", None],
+        "date_out": ["2010-01-01", "2016-01-02", "2016-01-03", "2009-12-31", None],
+    })
+
+    result = gp.filter_records_to_ipsych_date_window(
+        df,
+        input_date_in_name="date_in",
+        input_date_out_name="date_out",
+        options={
+            "enabled": True,
+            "diagnosis_start": "2010-01-01",
+            "diagnosis_end": "2016-01-01",
+        },
+    )
+
+    assert result["iid"].tolist() == ["starts_on_boundary", "crosses_end"]
+
+
+def test_ipsych_diagnosis_window_requires_both_date_columns():
+    with pytest.raises(ValueError, match="requires both date-in and date-out"):
+        gp.filter_records_to_ipsych_date_window(
+            pd.DataFrame({"date_in": ["2015-01-01"]}),
+            input_date_in_name="date_in",
+            input_date_out_name="date_out",
+            options={"enabled": True},
+        )
+
+
 def test_remove_duplicates_preserve_order():
     lst = [1, 2, 2, 3, 1, 4]
     assert gp.remove_duplicates_preserve_order(lst) == [1, 2, 3, 4]
@@ -232,6 +431,40 @@ def test_dict_update_icd_coding_basic():
     assert isinstance(updated_list, list)
 
 
+def test_load_phenotypes_normalizes_all_multi_phenotype_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(gp, "cluster_run", "Default")
+    request = tmp_path / "multi.tsv"
+    request.write_text(
+        "\n".join([
+            "mdd\tF32,F33",
+            "skiz\tF20",
+            "skizospek\tF20,F21,F22,F23,F24,F25,F28,F29",
+            "bipol\tF30,F31",
+            "affek\tF30,F31,F32,F33,F34,F35,F36,F37,F38,F39",
+            "autism\tF84.0,F84.1,F84.5,F84.8,F84.9",
+            "adhd\tF90.0",
+            "anorek\tF50.0,F50.1",
+        ]),
+        encoding="utf-8",
+    )
+
+    pheno, multi, normalized = gp.load_phenotypes(
+        pheno_request=str(request),
+        pheno_requestcol="diagnosis",
+        skip_icd_update=True,
+        exact_match=False,
+        remove_point_in_diag_request=False,
+    )
+
+    assert multi is True
+    assert set(normalized) == {
+        "F20", "F21", "F22", "F23", "F24", "F25", "F28", "F29",
+        "F30", "F31", "F32", "F33", "F34", "F35", "F36", "F37", "F38", "F39",
+        "F50.0", "F50.1", "F84.0", "F84.1", "F84.5", "F84.8", "F84.9", "F90.0",
+    }
+    assert set(gp.flatten_disorder_codes(pheno)) == set(normalized)
+
+
 def test_parse_pheno_rules_basic():
     # simple rule with range
     gp.cluster_run = "Default"
@@ -330,6 +563,211 @@ def test_load_data_file_and_finalize(tmp_path):
     df2 = pd.DataFrame({"c_adiag": ["A"], "d_inddto": [pd.Timestamp("2020-01-01")]})
     fin = gp.finalize_lpr_data(df2.copy(), diagnostic_col="c_adiag", birthdatecol="d_inddto", ctype_col="", verbose=False)
     assert "diagnosis" in fin.columns
+
+
+def test_load_additional_information_files_merges_columns_by_iid(tmp_path):
+    standard = tmp_path / "person.tsv"
+    extra = tmp_path / "laboratory.tsv"
+    pd.DataFrame({
+        "pnr": ["1", "2"],
+        "birthdate": ["1980-01-01", "1990-02-02"],
+        "region": ["north", None],
+    }).to_csv(standard, sep="\t", index=False)
+    pd.DataFrame({
+        "pnr": ["2", "3"],
+        "region": ["south", "west"],
+        "marker": [12, 18],
+    }).to_csv(extra, sep="\t", index=False)
+
+    result = gp.load_additional_information_files(
+        data_file=f"{standard},{extra}",
+        sep="\t",
+        birthdatecol="birthdate",
+        diagnostic_col="diagnosis",
+        sexcol="sex",
+        stam_cols_to_read_as_date=["birthdate"],
+        iidcol="pnr",
+    )
+
+    assert result.columns.tolist() == ["pnr", "birthdate", "region", "marker"]
+    assert result["pnr"].tolist() == ["1", "2", "3"]
+    assert result.set_index("pnr").loc["2", "region"] == "south"
+    assert result.set_index("pnr").loc["3", "marker"] == 18
+
+
+def test_additional_files_preserve_large_numeric_looking_iids(tmp_path):
+    person = tmp_path / "t_person.tsv"
+    deaths = tmp_path / "t_dodsaarsag_2.tsv"
+    person.write_text(
+        "cpr_enc\tD_FODDATO\tS_KON\n"
+        "9007199254740993\t1980-01-01\tF\n"
+        "9007199254740995\t1990-02-02\tM\n",
+        encoding="utf-8",
+    )
+    # The empty IID makes pandas infer float without an explicit IID dtype;
+    # values above 2**53 would then lose precision before the merge.
+    deaths.write_text(
+        "cpr_enc\tD_DODSDATO\tD_FINDEDATO\n"
+        "9007199254740993\t2020-03-04\t2020-03-05\n"
+        "9007199254740995\t2021-04-05\t2021-04-06\n"
+        "\t2022-01-01\t2022-01-02\n",
+        encoding="utf-8",
+    )
+
+    result = gp.load_additional_information_files(
+        data_file=f"{person},{deaths}",
+        sep="\t",
+        birthdatecol="D_FODDATO",
+        diagnostic_col="diagnosis",
+        sexcol="S_KON",
+        stam_cols_to_read_as_date=["D_FODDATO", "D_DODSDATO", "D_FINDEDATO"],
+        iidcol="cpr_enc",
+    ).set_index("cpr_enc")
+
+    assert result.loc["9007199254740993", "D_DODSDATO"] == pd.Timestamp("2020-03-04")
+    assert result.loc["9007199254740995", "D_FINDEDATO"] == pd.Timestamp("2021-04-06")
+
+
+def test_multiple_lpr_files_map_per_file_columns_and_fill_missing(tmp_path, capsys):
+    diagnoses = tmp_path / "lpr3_diagnoses.tsv"
+    procedures = tmp_path / "lpr3_procedures.tsv"
+    pd.DataFrame({
+        "cpr_enc": ["1"],
+        "source": ["lpr3_diagnoses"],
+        "date_in": ["2020-01-01"],
+        "date_out": ["2020-01-02"],
+        "contact_type": ["inpatient"],
+        "diagnosis_type": ["A"],
+        "diagnosis": ["F32"],
+    }).to_csv(diagnoses, sep="\t", index=False)
+    pd.DataFrame({
+        "cpr_enc": ["2"],
+        "source": ["lpr3_procedures"],
+        "procedure_date": ["2021-03-04"],
+        "date_out": ["2021-03-05"],
+        "code": ["KABC"],
+    }).to_csv(procedures, sep="\t", index=False)
+
+    schema = gp.build_lpr_input_schema(
+        lpr_file=f"{diagnoses},{procedures}",
+        diagnostic_col="diagnosis,code",
+        iidcol="cpr_enc",
+        input_date_in_name="date_in,procedure_date",
+        input_date_out_name="date_out",
+        ctype_col="diagnosis_type",
+    )
+    headers = [
+        {"path": str(diagnoses), "columns": gp._read_input_header(str(diagnoses), "\t")},
+        {"path": str(procedures), "columns": gp._read_input_header(str(procedures), "\t")},
+    ]
+    gp.validate_lpr_input_schema_headers(schema, headers)
+    result = gp.process_lpr_data(
+        lpr_file=f"{diagnoses},{procedures}",
+        lpr2nd_file="",
+        dta_input=False,
+        sep="\t",
+        lpr_cols_to_read_as_date=[],
+        DateFormat="%Y-%m-%d",
+        potential_lpr_cols_to_read_as_date=[],
+        diagnostic_col="diagnosis",
+        diagnostic2nd_col="",
+        lpr_recnummer="",
+        lpr2nd_recnummer="",
+        iidcol="cpr_enc",
+        lpr_schema=schema,
+        input_date_in_name="date_in",
+        input_date_out_name="date_out",
+        ctype_col="diagnosis_type",
+    )
+
+    assert result["diagnosis"].tolist() == ["F32", "KABC"]
+    assert result["cpr_enc"].tolist() == ["1", "2"]
+    assert result.loc[1, "date_in"] == pd.Timestamp("2021-03-04")
+    assert pd.isna(result.loc[1, "diagnosis_type"])
+    warning = capsys.readouterr().out
+    assert "--DiagTypecol" in warning
+    assert str(procedures) in warning
+    assert warning.count("--DiagTypecol") == 1
+
+
+def test_explicit_blank_per_file_column_adds_na_without_warning(tmp_path, capsys):
+    first = tmp_path / "diagnoses.tsv"
+    second = tmp_path / "procedures.tsv"
+    pd.DataFrame({"iid": ["1"], "diagnosis": ["F32"], "dtype": ["A"]}).to_csv(first, sep="\t", index=False)
+    pd.DataFrame({"iid": ["2"], "code": ["KABC"]}).to_csv(second, sep="\t", index=False)
+    schema = gp.build_lpr_input_schema(
+        f"{first},{second}", "diagnosis,code", "iid", ctype_col="dtype,"
+    )
+    headers = [
+        {"path": str(first), "columns": gp._read_input_header(str(first), "\t")},
+        {"path": str(second), "columns": gp._read_input_header(str(second), "\t")},
+    ]
+    gp.validate_lpr_input_schema_headers(schema, headers)
+    result = gp.process_lpr_data(
+        f"{first},{second}", "", False, "\t", [], "%Y-%m-%d", [],
+        "diagnosis", "", "", "", "iid", lpr_schema=schema, ctype_col="dtype",
+    )
+    assert pd.isna(result.loc[1, "dtype"])
+    assert "--DiagTypecol" not in capsys.readouterr().out
+
+
+def test_multiple_lpr_files_work_in_low_memory_batch(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    diagnoses = tmp_path / "diagnoses.tsv"
+    procedures = tmp_path / "procedures.tsv"
+    pd.DataFrame({"iid": ["1", "2"], "diagnosis": ["F32", "F33"]}).to_csv(diagnoses, sep="\t", index=False)
+    pd.DataFrame({"iid": ["2", "3"], "code": ["PROC2", "PROC3"]}).to_csv(procedures, sep="\t", index=False)
+    schema = gp.build_lpr_input_schema(
+        f"{diagnoses},{procedures}", "diagnosis,code", "iid"
+    )
+
+    result = gp.batch_load_lprfile(
+        df=pd.DataFrame(),
+        lprfile=f"{diagnoses},{procedures}",
+        lpr_recnummer="",
+        lpr2nd_file="",
+        lpr2nd_recnummer="",
+        iidcol="iid",
+        iid_batch=["2", "3"],
+        batch_num=0,
+        sep="\t",
+        potential_lpr_cols_to_read_as_date=[],
+        lpr_cols_to_read_as_date=[],
+        verbose=False,
+        dta_input=False,
+        DateFormat="%Y-%m-%d",
+        diagnostic_col="diagnosis",
+        diagnostic2nd_col="",
+        lpr_schema=schema,
+    )
+
+    assert set(result["iid"]) == {"2", "3"}
+    assert set(result["diagnosis"]) == {"F33", "PROC2", "PROC3"}
+    assert not list(tmp_path.glob("*.filtered_temp.csv"))
+
+
+def test_lpr_column_mapping_count_must_match_file_count():
+    with pytest.raises(ValueError, match="--fcol supplies 2 column names for 3 -f files"):
+        gp.build_lpr_input_schema("one.tsv,two.tsv,three.tsv", "diagnosis,code", "iid")
+
+
+def test_select_input_file_variant_keeps_matching_column_names():
+    path, columns = gp._select_input_file_variant(
+        "psyk.tsv,lpr.tsv",
+        1,
+        {
+            "diagnostic_col": "psyk_diag,lpr_diag",
+            "iidcol": "iid",
+            "ctype_col": "psyk_type,",
+        },
+    )
+
+    assert path == "lpr.tsv"
+    assert columns == {
+        "diagnostic_col": "lpr_diag",
+        "iidcol": "iid",
+        "ctype_col": "",
+    }
 
 
 def test_build_temp_file_and_load_mapping_rows(monkeypatch, tmp_path):
@@ -528,6 +966,37 @@ def test_preflight_input_files_reads_headers_and_reports_missing(tmp_path):
         gp.preflight_input_files([("missing", str(tmp_path / "missing.tsv"), "\t", True)])
 
 
+def test_read_input_header_uses_explicit_engine_for_regex_separator(tmp_path):
+    input_file = tmp_path / "input.tsv"
+    input_file.write_text("iid\tstatus\n1\tactive\n", encoding="utf-8")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        columns = gp._read_input_header(str(input_file), sep=r"\t")
+
+    assert columns == ["iid", "status"]
+    assert not any(isinstance(item.message, pd.errors.ParserWarning) for item in caught)
+
+
+def test_load_phenotypes_does_not_emit_applymap_futurewarning(tmp_path):
+    request = tmp_path / "phenotypes.tsv"
+    request.write_text(" MDD \t F32,F33 \n", encoding="utf-8")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        phenotypes, _, _ = gp.load_phenotypes(
+            pheno_request=str(request),
+            pheno_requestcol="diagnosis",
+            skip_icd_update=True,
+        )
+
+    assert phenotypes.iloc[0].tolist() == ["MDD", ["F32", "F33"]]
+    assert not any(
+        isinstance(item.message, FutureWarning) and "applymap" in str(item.message)
+        for item in caught
+    )
+
+
 def test_contains_atc_codes_detects_nested_main_and_exclusion_values(tmp_path):
     exclusion_file = tmp_path / "exclusions.tsv"
     exclusion_file.write_text("Disorder\tDisorder Codes\nAUD\tICD10:F10\nMED\tmain=ATC:N06A;sub=ICD10:F32\n", encoding="utf-8")
@@ -593,6 +1062,15 @@ def test_add_chb_degen_compat_columns_aliases_new_and_old_names():
     assert degen_only["chb"].tolist() == ["TRUE", "FALSE"]
 
 
+def test_group_cohort_columns_keeps_only_present_columns_together():
+    cols = ["iid", "birthdate", "chb", "sex", "dbds", "degen", "diagnosis"]
+
+    assert gp.group_cohort_columns(cols) == [
+        "iid", "birthdate", "chb", "dbds", "degen", "sex", "diagnosis"
+    ]
+    assert gp.group_cohort_columns(["iid", "birthdate", "sex"]) == ["iid", "birthdate", "sex"]
+
+
 def test_expected_output_schema_uses_stam_first_and_source_specific_columns():
     pheno = pd.DataFrame({
         "Disorder": ["AUD", "MED", "MIXED"],
@@ -624,6 +1102,30 @@ def test_expected_output_schema_uses_stam_first_and_source_specific_columns():
     assert "MIXED_admissiontype" in cols
     assert "MIXED_apk" in cols
     assert "EXC_apk" in cols
+
+
+def test_expected_output_schema_does_not_add_missing_cohort_aliases():
+    pheno = pd.DataFrame({"Disorder": ["MDD"], "Disorder Codes": ["ICD10:F32"]})
+
+    cols = gp.build_expected_output_columns(
+        iidcol="iid",
+        df3_columns=["iid", "birthdate", "chb", "sex", "dbds"],
+        df4_columns=[],
+        in_pheno_codes=pheno,
+        lifetime_exclusions=pd.DataFrame(),
+        oneYearPrior_exclusions=pd.DataFrame(),
+        post_exclusions=pd.DataFrame(),
+        covariates=pd.DataFrame(),
+        cluster_run="CHB_DBDS",
+        ctype_col="",
+        sexcol="sex",
+        main_pheno_name="MainPheno",
+    )
+
+    assert cols[:5] == ["iid", "birthdate", "chb", "dbds", "sex"]
+    assert "degen" not in cols
+    assert "degen_new" not in cols
+    assert "degen_old" not in cols
 
 
 def test_coalesce_suffixed_columns_prefers_new_merge_values():

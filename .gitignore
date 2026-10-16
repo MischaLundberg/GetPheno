@@ -3,3 +3,4 @@ misc/
 .vscode/
 .continue/
 __pycache__/
+shiny_app/projects.conf

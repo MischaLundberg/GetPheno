@@ -650,6 +650,436 @@ def BirthCountry_DK(x):
     result = np.select(conditions, choices, default='Unknown')
     return result if len(result) > 1 else result[0]
 
+
+IPSYCH_COMPARISON_DEFAULTS = {
+    "enabled": False,
+    "birth_start": "1981-05-01",
+    "birth_end": "2009-01-01",
+    "diagnosis_start": "",
+    "diagnosis_end": "2016-01-01",
+    "dk_parents_col": "",
+    "birthplace_col": "fkode",
+    "mother_col": "pnr_m",
+    "status_col": "stat",
+    "status_date_col": "statd",
+    "deathdate_col": "",
+    "death_age_range": "0,0",
+    "keep_alive": False,
+    "only_dead": False,
+    "exclude_multiple_births": True,
+}
+
+
+def normalize_ipsych_comparison_options(options=None):
+    normalized = IPSYCH_COMPARISON_DEFAULTS.copy()
+    if options:
+        normalized.update(options)
+    normalized["enabled"] = str(normalized["enabled"]).strip().lower() in ("true", "1", "yes")
+    normalized["exclude_multiple_births"] = str(
+        normalized["exclude_multiple_births"]
+    ).strip().lower() in ("true", "1", "yes")
+    normalized["keep_alive"] = str(normalized["keep_alive"]).strip().lower() in (
+        "true", "1", "yes"
+    )
+    normalized["only_dead"] = str(normalized["only_dead"]).strip().lower() in (
+        "true", "1", "yes"
+    )
+    return normalized
+
+
+def _ipsych_boundary(value, name):
+    if value in (None, ""):
+        return None
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        raise ValueError(f"Invalid {name} date '{value}'. Expected YYYY-MM-DD.")
+    return pd.Timestamp(parsed).tz_localize(None) if parsed.tzinfo is not None else pd.Timestamp(parsed)
+
+
+def _emit_ipsych_warning(message):
+    full_message = f"[iPSYCH comparison] WARNING: {message}"
+    active_logger = globals().get("logger")
+    if active_logger is not None:
+        active_logger.warning(full_message)
+    print(full_message)
+
+
+def _ipsych_danish_birthplace_mask(values):
+    numeric = pd.to_numeric(values, errors="coerce")
+    return (
+        numeric.between(10, 900)
+        | numeric.between(1101, 1199)
+        | numeric.between(1301, 1315)
+        | numeric.between(1317, 1325)
+        | numeric.between(2401, 2599)
+        | numeric.between(4601, 4688)
+        | numeric.between(6001, 6903)
+        | numeric.between(7001, 9348)
+        | numeric.isin([4998, 5100])
+    )
+
+
+def _truthy_indicator_mask(values):
+    normalized = values.astype("string").str.strip().str.upper()
+    return normalized.isin({"1", "1.0", "TRUE", "T", "YES", "Y", "DKDK", "DK", "DENMARK", "DANISH"})
+
+
+def _parse_age_range(value, label):
+    parts = [part.strip() for part in str(value or "0,0").split(",")]
+    if len(parts) != 2:
+        raise ValueError(f"{label} must contain minimum and maximum ages separated by a comma")
+    try:
+        minimum, maximum = (int(part) for part in parts)
+    except ValueError as exc:
+        raise ValueError(f"{label} must contain two non-negative integers") from exc
+    if minimum < 0 or maximum < 0:
+        raise ValueError(f"{label} must contain two non-negative integers")
+    if maximum and minimum > maximum:
+        raise ValueError(f"{label} minimum cannot exceed its maximum")
+    return minimum, maximum
+
+
+def apply_death_filters(
+    df,
+    birthdatecol="birthdate",
+    deathdatecol="",
+    min_max_age_death="0,0",
+    keep_alive=False,
+    only_dead=False,
+    require_alive_at_one=False,
+):
+    """Apply IID-level death filters and derive completed age at death."""
+    keep_alive = _as_bool(keep_alive)
+    only_dead = _as_bool(only_dead)
+    minimum_age, maximum_age = _parse_age_range(
+        min_max_age_death, "MinMaxAgeDeath"
+    )
+    age_filter_active = bool(minimum_age or maximum_age)
+    if keep_alive and only_dead:
+        raise ValueError("--keepAlive and --onlyDead cannot be enabled together")
+    if not deathdatecol:
+        if age_filter_active or keep_alive or only_dead:
+            raise ValueError(
+                "--deathdatecol is required when using death-status or age-at-death filters"
+            )
+        return df.copy()
+    if deathdatecol not in df.columns:
+        raise ValueError(
+            f"Configured death-date column '{deathdatecol}' is unavailable in -i/-j metadata"
+        )
+
+    actual_birthdate_col = birthdatecol if birthdatecol in df.columns else "birthdate"
+    if (age_filter_active or require_alive_at_one) and actual_birthdate_col not in df.columns:
+        raise ValueError(
+            f"Death filtering requires birthdate column '{birthdatecol}' in -i/-j metadata"
+        )
+
+    out = df.copy()
+    raw_death = out[deathdatecol]
+    raw_nonempty = raw_death.notna() & raw_death.astype("string").str.strip().ne("")
+    death_date = _to_datetime_series(raw_death, fmt=DateFormat, dayfirst=DayFirst)
+    invalid = raw_nonempty & death_date.isna()
+    if invalid.any():
+        raise ValueError(
+            f"Death-date column '{deathdatecol}' contains {int(invalid.sum())} nonempty, invalid date value(s)"
+        )
+    out[deathdatecol] = death_date
+    death_known = death_date.notna()
+
+    if actual_birthdate_col in out.columns:
+        birth_date = _to_datetime_series(
+            out[actual_birthdate_col], fmt=DateFormat, dayfirst=DayFirst
+        )
+        before_birthday = (
+            (death_date.dt.month < birth_date.dt.month)
+            | (
+                (death_date.dt.month == birth_date.dt.month)
+                & (death_date.dt.day < birth_date.dt.day)
+            )
+        )
+        age_at_death = (
+            death_date.dt.year - birth_date.dt.year - before_birthday.astype("Int64")
+        ).astype("Int64")
+        age_at_death = age_at_death.where(death_known & birth_date.notna())
+        out["AgeAtDeath"] = age_at_death
+    else:
+        birth_date = pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns]")
+        age_at_death = pd.Series(pd.NA, index=out.index, dtype="Int64")
+
+    keep = pd.Series(True, index=out.index)
+    if require_alive_at_one:
+        first_birthday = birth_date + pd.DateOffset(years=1)
+        keep &= ~death_known | (death_date >= first_birthday)
+    if age_filter_active:
+        age_match = death_known & age_at_death.notna()
+        if minimum_age:
+            age_match &= age_at_death >= minimum_age
+        if maximum_age:
+            age_match &= age_at_death <= maximum_age
+        keep &= age_match | (~death_known & keep_alive)
+    if only_dead:
+        keep &= death_known
+    return out.loc[keep].copy()
+
+
+def combine_ipsych_iid_metadata(stam_df, additional_df, iidcol):
+    """Combine one-row-per-IID metadata from -i and -j for cohort filtering."""
+    return merge_iid_metadata_frames(
+        stam_df,
+        additional_df,
+        iidcol=iidcol,
+        how="left",
+        prefer="right",
+        left_label="STAM",
+        right_label="additional information",
+    )
+
+
+def apply_ipsych_cohort_restrictions(df, iidcol, birthdatecol="birthdate", options=None):
+    """Restrict the STAM/IID universe to the iPSYCH-comparison cohort."""
+    opts = normalize_ipsych_comparison_options(options)
+    if not opts["enabled"]:
+        return df.copy()
+    if iidcol not in df.columns:
+        raise ValueError(f"iPSYCH comparison requires IID column '{iidcol}' in the STAM file.")
+
+    actual_birthdate_col = birthdatecol if birthdatecol in df.columns else "birthdate"
+    if actual_birthdate_col not in df.columns:
+        raise ValueError(
+            f"iPSYCH comparison requires birthdate column '{birthdatecol}' in the STAM file."
+        )
+
+    out = df.copy()
+    initial_iids = out[iidcol].nunique()
+    out[actual_birthdate_col] = _to_datetime_series(
+        out[actual_birthdate_col], fmt=DateFormat, dayfirst=DayFirst
+    )
+    birth_start = _ipsych_boundary(opts["birth_start"], "iPSYCH birth-start")
+    birth_end = _ipsych_boundary(opts["birth_end"], "iPSYCH birth-end")
+    birth_mask = out[actual_birthdate_col].notna()
+    if birth_start is not None:
+        birth_mask &= out[actual_birthdate_col] >= birth_start
+    if birth_end is not None:
+        birth_mask &= out[actual_birthdate_col] < birth_end
+    out = out.loc[birth_mask].copy()
+
+    death_filters_requested = (
+        bool(opts["deathdate_col"])
+        or _parse_age_range(opts["death_age_range"], "MinMaxAgeDeath") != (0, 0)
+        or opts["keep_alive"]
+        or opts["only_dead"]
+    )
+    if death_filters_requested:
+        out = apply_death_filters(
+            out,
+            birthdatecol=actual_birthdate_col,
+            deathdatecol=opts["deathdate_col"],
+            min_max_age_death=opts["death_age_range"],
+            keep_alive=opts["keep_alive"],
+            only_dead=opts["only_dead"],
+            require_alive_at_one=True,
+        )
+
+    birthplace_col = opts["birthplace_col"]
+    if birthplace_col and birthplace_col in out.columns:
+        out["DK_born"] = _ipsych_danish_birthplace_mask(out[birthplace_col])
+        out = out.loc[out["DK_born"]].copy()
+    elif birthplace_col:
+        _emit_ipsych_warning(
+            f"birthplace column '{birthplace_col}' is unavailable; the Danish-birth restriction was not applied."
+        )
+
+    mother_col = opts["mother_col"]
+    if mother_col and mother_col in out.columns:
+        mother = out[mother_col].astype("string").str.strip()
+        out = out.loc[mother.notna() & mother.ne("")].copy()
+    elif mother_col:
+        _emit_ipsych_warning(
+            f"maternal identifier column '{mother_col}' is unavailable; maternal-CPR and multiple-birth restrictions were not applied."
+        )
+
+    status_col = opts["status_col"]
+    status_date_col = opts["status_date_col"]
+    has_status = bool(status_col) and status_col in out.columns
+    has_status_date = bool(status_date_col) and status_date_col in out.columns
+    if has_status or has_status_date:
+        age_one_mask = pd.Series(False, index=out.index)
+        if has_status_date:
+            out[status_date_col] = _to_datetime_series(
+                out[status_date_col], fmt=DateFormat, dayfirst=DayFirst
+            )
+            age_one_mask |= out[status_date_col] >= (
+                out[actual_birthdate_col] + pd.Timedelta(days=365)
+            )
+        if has_status:
+            age_one_mask |= out[status_col].astype("string").str.strip().isin(
+                {"1", "1.0", "3", "3.0"}
+            )
+        out = out.loc[age_one_mask].copy()
+    else:
+        _emit_ipsych_warning(
+            f"neither status column '{status_col}' nor status-date column '{status_date_col}' is available; residence/alive-at-age-one restriction was not applied."
+        )
+
+    requested_dk_parents_col = str(opts["dk_parents_col"] or "").strip()
+    dk_parent_candidates = [
+        requested_dk_parents_col,
+        "DKDK",
+        "dkdk",
+        "both_parents_DK",
+        "both_parents_dk",
+    ]
+    dk_parents_col = next((col for col in dk_parent_candidates if col and col in out.columns), "")
+    if dk_parents_col:
+        out["both_parents_DK"] = _truthy_indicator_mask(out[dk_parents_col])
+    elif {"fkode_m", "fkode_f"}.issubset(out.columns):
+        out["both_parents_DK"] = (
+            _ipsych_danish_birthplace_mask(out["fkode_m"])
+            & _ipsych_danish_birthplace_mask(out["fkode_f"])
+        )
+    else:
+        requested = requested_dk_parents_col or "DKDK/both_parents_DK"
+        _emit_ipsych_warning(
+            f"no '{requested}' indicator or fkode_m/fkode_f columns were found. "
+            "The Danish-born-parents (DKDK) indicator could not be reported."
+        )
+
+    out = out.drop_duplicates(subset=[iidcol], keep="first")
+    if opts["exclude_multiple_births"] and mother_col and mother_col in out.columns:
+        multiple_birth_mask = out.duplicated(
+            subset=[mother_col, actual_birthdate_col], keep=False
+        )
+        out = out.loc[~multiple_birth_mask].copy()
+
+    active_logger = globals().get("logger")
+    if active_logger is not None:
+        active_logger.info(
+            "[iPSYCH comparison] Restricted STAM/IID universe from %s to %s IIDs.",
+            initial_iids,
+            out[iidcol].nunique(),
+        )
+    return out
+
+
+def restrict_ipsych_iid_inputs(stam_df, additional_df, iidcol, birthdatecol, options=None):
+    """Apply iPSYCH restrictions using metadata from both -i and -j."""
+    metadata = combine_ipsych_iid_metadata(stam_df, additional_df, iidcol)
+    restricted = apply_ipsych_cohort_restrictions(
+        metadata,
+        iidcol=iidcol,
+        birthdatecol=birthdatecol,
+        options=options,
+    )
+    retained_iids = set(normalized_iid_list(restricted[iidcol]))
+    stam_out = enforce_iid_universe(
+        stam_df, iidcol, retained_iids, "STAM after iPSYCH restrictions", unique_iids=True
+    )
+    additional_out = additional_df
+    if additional_df is not None and not additional_df.empty:
+        additional_out = enforce_iid_universe(
+            additional_df,
+            iidcol,
+            retained_iids,
+            "additional information after iPSYCH restrictions",
+            unique_iids=True,
+        )
+
+    for derived_col in ("DK_born", "both_parents_DK", "AgeAtDeath"):
+        available_in_additional = (
+            additional_out is not None and derived_col in additional_out.columns
+        )
+        if derived_col in restricted.columns and derived_col not in stam_out.columns and not available_in_additional:
+            derived = restricted[[iidcol, derived_col]].drop_duplicates(subset=[iidcol])
+            stam_out = stam_out.merge(derived, on=iidcol, how="left")
+    return stam_out, additional_out
+
+
+def restrict_iid_inputs_by_death(
+    stam_df,
+    additional_df,
+    iidcol,
+    birthdatecol,
+    deathdatecol,
+    min_max_age_death="0,0",
+    keep_alive=False,
+    only_dead=False,
+):
+    """Apply death filters using metadata combined from -i and -j."""
+    metadata = combine_ipsych_iid_metadata(stam_df, additional_df, iidcol)
+    restricted = apply_death_filters(
+        metadata,
+        birthdatecol=birthdatecol,
+        deathdatecol=deathdatecol,
+        min_max_age_death=min_max_age_death,
+        keep_alive=keep_alive,
+        only_dead=only_dead,
+    )
+    retained_iids = set(normalized_iid_list(restricted[iidcol]))
+    stam_out = enforce_iid_universe(
+        stam_df, iidcol, retained_iids, "STAM after death filters", unique_iids=True
+    )
+    additional_out = additional_df
+    if additional_df is not None and not additional_df.empty:
+        additional_out = enforce_iid_universe(
+            additional_df,
+            iidcol,
+            retained_iids,
+            "additional information after death filters",
+            unique_iids=True,
+        )
+    if "AgeAtDeath" in restricted.columns:
+        available_in_additional = (
+            additional_out is not None and "AgeAtDeath" in additional_out.columns
+        )
+        if "AgeAtDeath" not in stam_out.columns and not available_in_additional:
+            age = restricted[[iidcol, "AgeAtDeath"]].drop_duplicates(subset=[iidcol])
+            stam_out = stam_out.merge(age, on=iidcol, how="left")
+    return stam_out, additional_out
+
+
+def filter_records_to_ipsych_date_window(
+    df, input_date_in_name, input_date_out_name, options=None, label="diagnosis"
+):
+    """Keep episodes overlapping the configured half-open iPSYCH date window."""
+    opts = normalize_ipsych_comparison_options(options)
+    if not opts["enabled"] or df is None or df.empty:
+        return df.copy() if df is not None else pd.DataFrame()
+
+    missing = [
+        col for col in (input_date_in_name, input_date_out_name)
+        if not col or col not in df.columns
+    ]
+    if missing:
+        raise ValueError(
+            f"iPSYCH comparison requires both date-in and date-out columns for {label}; "
+            f"missing: {missing}."
+        )
+
+    out = df.copy()
+    date_in = _to_datetime_series(out[input_date_in_name], fmt=DateFormat, dayfirst=DayFirst)
+    date_out = _to_datetime_series(out[input_date_out_name], fmt=DateFormat, dayfirst=DayFirst)
+    interval_start = pd.concat([date_in, date_out], axis=1).min(axis=1)
+    interval_end = pd.concat([date_in, date_out], axis=1).max(axis=1)
+    diagnosis_start = _ipsych_boundary(opts["diagnosis_start"], "iPSYCH diagnosis-start")
+    diagnosis_end = _ipsych_boundary(opts["diagnosis_end"], "iPSYCH diagnosis-end")
+
+    keep = interval_start.notna() & interval_end.notna()
+    if diagnosis_start is not None:
+        keep &= interval_end >= diagnosis_start
+    if diagnosis_end is not None:
+        keep &= interval_start < diagnosis_end
+    filtered = out.loc[keep].copy()
+
+    active_logger = globals().get("logger")
+    if active_logger is not None:
+        active_logger.info(
+            "[iPSYCH comparison] Restricted %s records from %s to %s using date-in/date-out overlap.",
+            label,
+            len(out),
+            len(filtered),
+        )
+    return filtered
+
 def detect_ATC_status(df, colname="Disorder Codes"):
                 """Return 'All', 'Some', or 'None' depending on ATC code presence."""
                 if df.empty or colname not in df.columns:
@@ -759,7 +1189,7 @@ This file and the contents of the directory it is situated in, was generated by 
 
 ## General Information
 
-- `MainPhenoName` refers to the main (first) phenotype requested. 
+- `MainPhenoName` refers to the main (first) phenotype requested and is only used, if you requested only one phenotype and did not specify a name for it either by tab delimited request file or through the use of --name. 
 - Exclusions (Lifetime/Post/OneYearPrior) are currently only applied to the MainPheno.
 - You can define exclusions separately for each phenotype like this (example based on MDD):
 
@@ -773,7 +1203,22 @@ This file and the contents of the directory it is situated in, was generated by 
 {phenotypes}
 
 ---
+"""
 
+    if "--iPSYCHComparison" in parsed_flags_used or "--ipsych-comparison" in parsed_flags_used:
+        readme += """
+## iPSYCH-comparison cohort
+
+This run built the user-supplied phenotype definitions directly from diagnosis records after applying the configured birthdate, cohort, and diagnosis-episode restrictions. Only IIDs inside the configured birthdate interval are reported. Diagnosis timing uses both the configured date-in and date-out columns.
+
+When a death-date column was configured, recorded deaths before the first birthday were excluded. Without a configured death-date column, the existing civil-status/status-date rule was used on its own.
+
+**Warning:** If the input contained no DKDK/both-Danish-born-parents indicator and no `fkode_m`/`fkode_f` columns, GetPheno printed a warning because the parental-birthplace indicator could not be reported. Parental birthplace is not an inclusion criterion.
+
+---
+"""
+
+    readme += f"""
 ## Your selected flags for this run
 
 {flags_used}
@@ -820,6 +1265,8 @@ This file and the contents of the directory it is situated in, was generated by 
 | dbds                             | TRUE/FALSE if from DBDS cohort (only in CHB/DBDS)                                                    |
 | degen/chb                            | TRUE/FALSE if from DEGEN cohort (only in CHB/DBDS)                                                   |
 | Age_FirstDx                      | Age at first diagnosis                                                                               |"""
+    readme += """
+| AgeAtDeath                      | Completed age at death when a death-date column was configured                                       |"""
     
     # === IID Status ===
     if statuscol != "":
@@ -975,6 +1422,14 @@ def _split_input_paths(paths):
         return [str(path).strip() for path in paths if str(path).strip()]
     return [path.strip() for path in str(paths).split(",") if path.strip()]
 
+
+def _separator_requires_python_engine(sep):
+    """Return whether pandas must use its Python parser for this separator."""
+    return sep is None or (
+        isinstance(sep, str) and len(sep) > 1 and sep != r"\s+"
+    )
+
+
 def _read_input_header(path, sep=","):
     if path.lower().endswith((".dta", ".stata")):
         try:
@@ -982,10 +1437,10 @@ def _read_input_header(path, sep=","):
                 return reader.read(0).columns.tolist()
         except TypeError:
             return pd.read_stata(path).head(0).columns.tolist()
-    try:
-        return pd.read_csv(path, sep=sep, nrows=0).columns.tolist()
-    except TypeError:
-        return pd.read_csv(path, sep=sep, nrows=0, engine="python").columns.tolist()
+    read_options = {"sep": sep, "nrows": 0}
+    if _separator_requires_python_engine(sep):
+        read_options["engine"] = "python"
+    return pd.read_csv(path, **read_options).columns.tolist()
 
 def preflight_input_files(file_specs):
     """Check file availability and capture headers before loading full data."""
@@ -1005,6 +1460,145 @@ def preflight_input_files(file_specs):
             headers[label].append({"path": path, "columns": columns})
             logger.info(f"[preflight_input_files] {label}: {path}; columns={columns}")
     return headers
+
+
+def _split_lpr_column_spec(value):
+    """Split a per-file column option while preserving explicit empty entries."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value]
+    text = str(value).strip()
+    if not text:
+        return []
+    return [item.strip() for item in text.split(",")]
+
+
+def _select_input_file_variant(paths_value, selected_index, column_values):
+    """Select one of two conventional sources and its per-file column names."""
+    paths = _split_input_paths(paths_value)
+    if len(paths) != 2:
+        return paths_value, column_values
+
+    selected_columns = {}
+    for option, value in column_values.items():
+        names = _split_lpr_column_spec(value)
+        selected_columns[option] = names[selected_index] if len(names) == len(paths) else value
+    return paths[selected_index], selected_columns
+
+
+def build_lpr_input_schema(
+    lpr_file,
+    diagnostic_col,
+    iidcol,
+    input_date_in_name="",
+    input_date_out_name="",
+    ctype_col="",
+    lpr_recnummer="",
+):
+    """Resolve canonical and per-file column names for one or more -f files."""
+    paths = _split_input_paths(lpr_file)
+    if not paths:
+        return {"paths": [], "source_paths": [], "columns": {}, "missing_reported": set()}
+
+    supplied = OrderedDict([
+        ("diagnostic_col", diagnostic_col),
+        ("iidcol", iidcol),
+        ("input_date_in_name", input_date_in_name),
+        ("input_date_out_name", input_date_out_name),
+        ("ctype_col", ctype_col),
+        ("lpr_recnummer", lpr_recnummer),
+    ])
+    option_flags = {
+        "diagnostic_col": "--fcol",
+        "iidcol": "--iidcol",
+        "input_date_in_name": "--din",
+        "input_date_out_name": "--don",
+        "ctype_col": "--DiagTypecol",
+        "lpr_recnummer": "--recnum",
+    }
+    columns = {}
+    for option, value in supplied.items():
+        names = _split_lpr_column_spec(value)
+        if not names:
+            continue
+        explicit_per_file = len(names) > 1
+        if len(names) == 1:
+            names *= len(paths)
+        elif len(names) != len(paths):
+            raise ValueError(
+                f"{option_flags[option]} supplies {len(names)} column names for {len(paths)} -f files; "
+                "supply either one name or exactly one name per file"
+            )
+        if not names[0]:
+            raise ValueError(f"The first {option_flags[option]} column name cannot be empty")
+        columns[option] = {
+            "canonical": names[0],
+            "sources": names,
+            "flag": option_flags[option],
+            "explicit_per_file": explicit_per_file,
+        }
+    return {
+        "paths": paths,
+        "source_paths": paths.copy(),
+        "columns": columns,
+        "missing_reported": set(),
+    }
+
+
+def _lpr_schema_value(schema, option, fallback=""):
+    return schema.get("columns", {}).get(option, {}).get("canonical", fallback)
+
+
+def _warn_missing_lpr_column(schema, path, option, source, canonical):
+    key = (path, option, source, canonical)
+    reported = schema.setdefault("missing_reported", set())
+    if key in reported:
+        return
+    reported.add(key)
+    requested = source or "<empty>"
+    flag = schema["columns"].get(option, {}).get("flag", f"--{option}")
+    message = (
+        f"[LPR columns] WARNING: '{requested}' for {flag} is not available in {path}; "
+        f"canonical column '{canonical}' will be filled with NA for this file."
+    )
+    logger.warning(message)
+    if not verbose:
+        print(message)
+
+
+def validate_lpr_input_schema_headers(schema, header_records):
+    """Validate per-file mappings against preflight headers and report missing columns once."""
+    if len(header_records) != len(schema.get("paths", [])):
+        raise ValueError("LPR preflight headers do not match the configured -f files")
+    for index, (path, header_record) in enumerate(zip(schema["paths"], header_records)):
+        columns = set(header_record["columns"])
+        for option, mapping in schema["columns"].items():
+            source = mapping["sources"][index]
+            if source and source not in columns:
+                _warn_missing_lpr_column(
+                    schema, path, option, source, mapping["canonical"]
+                )
+
+
+def subset_lpr_input_schema(schema, indexes, paths):
+    """Create a schema for filtered temporary files while retaining their source mappings."""
+    return {
+        "paths": list(paths),
+        "source_paths": [
+            schema.get("source_paths", schema["paths"])[index] for index in indexes
+        ],
+        "columns": {
+            option: {
+                "canonical": mapping["canonical"],
+                "sources": [mapping["sources"][index] for index in indexes],
+                "flag": mapping.get("flag", f"--{option}"),
+                "explicit_per_file": mapping.get("explicit_per_file", False),
+            }
+            for option, mapping in schema["columns"].items()
+        },
+        "missing_reported": schema.setdefault("missing_reported", set()),
+    }
 
 def _iter_code_tokens(value):
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -1193,6 +1787,20 @@ def _as_list(x: Any) -> List[Any]:
         seq = [x]
     return [item for item in seq if str(item).strip() != ""]
 
+def flatten_disorder_codes(table):
+    if table is None or not isinstance(table, pd.DataFrame) or table.empty or "Disorder Codes" not in table.columns:
+        return []
+    out = []
+    for item in table["Disorder Codes"]:
+        if isinstance(item, (list, tuple, set, pd.Series, np.ndarray)):
+            values = list(item)
+        elif isinstance(item, str) and "," in item:
+            values = [v.strip() for v in item.split(",")]
+        else:
+            values = [item]
+        out.extend(str(v).strip() for v in values if str(v).strip() != "")
+    return out
+
 def _to_dt_list(x: Any) -> List[pd.Timestamp]:
     arr = _as_list(x)
     if not arr:
@@ -1219,6 +1827,77 @@ def normalize_iid_series(s, target="str"):
 
     out = pd.to_numeric(s, errors="coerce")
     return out.astype("Int64")
+
+
+def merge_iid_metadata_frames(
+    left,
+    right,
+    iidcol,
+    how="outer",
+    prefer="left",
+    left_label="left metadata",
+    right_label="right metadata",
+):
+    """Merge one-row-per-IID metadata with deterministic overlap precedence."""
+    if how not in {"left", "outer"}:
+        raise ValueError("Metadata merge supports only 'left' and 'outer' joins")
+    if prefer not in {"left", "right"}:
+        raise ValueError("Metadata merge preference must be 'left' or 'right'")
+
+    left = pd.DataFrame() if left is None else left.copy()
+    right = pd.DataFrame() if right is None else right.copy()
+    if left.empty and not len(left.columns):
+        if right.empty and not len(right.columns):
+            return pd.DataFrame()
+        if iidcol not in right.columns:
+            raise ValueError(f"{right_label} is missing IID column '{iidcol}'")
+        right[iidcol] = normalize_iid_series(right[iidcol], target="str")
+        return right.drop_duplicates(subset=[iidcol], keep="first").copy()
+    if iidcol not in left.columns:
+        raise ValueError(f"{left_label} is missing IID column '{iidcol}'")
+    if right.empty and not len(right.index):
+        left[iidcol] = normalize_iid_series(left[iidcol], target="str")
+        return left.drop_duplicates(subset=[iidcol], keep="first").copy()
+    if iidcol not in right.columns:
+        raise ValueError(f"{right_label} is missing IID column '{iidcol}'")
+
+    left[iidcol] = normalize_iid_series(left[iidcol], target="str")
+    right[iidcol] = normalize_iid_series(right[iidcol], target="str")
+    left = left.drop_duplicates(subset=[iidcol], keep="first").copy()
+    right = right.drop_duplicates(subset=[iidcol], keep="first").copy()
+    left_columns = left.columns.tolist()
+    right_new_columns = [col for col in right.columns if col not in left_columns]
+    overlap_columns = [
+        col for col in right.columns if col in left_columns and col != iidcol
+    ]
+    merged = left.merge(
+        right,
+        on=iidcol,
+        how=how,
+        sort=False,
+        suffixes=("__left", "__right"),
+        validate="one_to_one",
+    )
+    for column in overlap_columns:
+        left_column = f"{column}__left"
+        right_column = f"{column}__right"
+        preferred, fallback = (
+            (left_column, right_column)
+            if prefer == "left"
+            else (right_column, left_column)
+        )
+        preferred_values = merged[preferred]
+        if pd.api.types.is_object_dtype(preferred_values.dtype) or pd.api.types.is_string_dtype(preferred_values.dtype):
+            preferred_values = preferred_values.astype(object)
+            blank = preferred_values.map(
+                lambda value: isinstance(value, str) and not value.strip()
+            )
+            preferred_values = preferred_values.mask(blank, pd.NA)
+        merged[column] = preferred_values.where(
+            preferred_values.notna(), merged[fallback]
+        )
+        merged.drop(columns=[left_column, right_column], inplace=True)
+    return merged[left_columns + right_new_columns]
 
 
 def normalized_iid_list(values):
@@ -1286,6 +1965,26 @@ def cohort_membership_mask(df, columns):
             values = df[col].astype("string").str.strip().str.upper()
             mask |= values.isin(["TRUE", "T", "1", "YES", "Y"])
     return mask
+
+COHORT_MEMBERSHIP_COLUMNS = ["chb", "dbds", "degen", "degen_new", "degen_old"]
+CHB_EQUIVALENT_COLUMNS = ["chb", "degen", "degen_new", "degen_old"]
+
+def group_cohort_columns(columns):
+    cols = list(columns or [])
+    present = list(dict.fromkeys([c for c in cols if c in COHORT_MEMBERSHIP_COLUMNS]))
+    if not present:
+        return cols
+
+    out = []
+    inserted = False
+    for col in cols:
+        if col in COHORT_MEMBERSHIP_COLUMNS:
+            if not inserted:
+                out.extend(present)
+                inserted = True
+            continue
+        out.append(col)
+    return out
 
 def add_chb_degen_compat_columns(df):
     out = df.copy()
@@ -1419,7 +2118,8 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
          num_threads, main_pheno_name, BuildEntryExitDates, build_ophold, write_pickle, write_fastGWA_format, write_Plink2_format, lpr_cols_to_read_as_date, 
          stam_cols_to_read_as_date, MinMaxAge, ICDCM, load_precreated_phenotypes, RegisterRun, lowMem, verylowMem, batchsize, noLeadingICD, lpr2nd_file, lpr_recnummer, lpr2nd_recnummer, 
          diagnostic2nd_col, atc_file, atc_diag_col, atc_date, atc_datecols, runLPRonly, runPSYKonly, opholdsep, ophold_file, inifile, only_ICD8_arg, only_ICD9_arg, only_ICD10_arg, 
-         BuildIndex, IndexDtypes, icdprefix, argstring, defaultargs, default_argstring):
+         BuildIndex, IndexDtypes, icdprefix, argstring, defaultargs, default_argstring, ipsych_options=None,
+         deathdatecol="", MinMaxAgeDeath="0,0", keepAlive=False, onlyDead=False):
     
     ## Add global variables
     global min_Age
@@ -1440,6 +2140,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
     global ATC_Requested
 
     ATC_Requested = "NotSet"
+    ipsych_options = normalize_ipsych_comparison_options(ipsych_options)
     
     ## Initialize global variables based on userinput
     min_Age = int(MinMaxAge.split(',')[0])
@@ -1454,8 +2155,6 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
     ## Initialize local variables
     num_threads = int(num_threads)
     dta_input=False
-    runPSYKonly = False
-    runLPRonly = False
     processed_ophold_file = "" 
     potential_lpr_cols_to_read_as_date = []
     atc_date_col = ""
@@ -1575,6 +2274,9 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             if("--bdcol" in defaultargs and config.has_option(cluster_run, "birthdatecol")):
                 birthdatecol = config.get(cluster_run, "birthdatecol")
                 argstring = argstring+(f"--bdcol: {birthdatecol} (Set by loading config file)\n")
+            if("--deathdatecol" in defaultargs and config.has_option(cluster_run, "deathdatecol")):
+                deathdatecol = config.get(cluster_run, "deathdatecol")
+                argstring = argstring+(f"--deathdatecol: {deathdatecol} (Set by loading config file)\n")
             if("--iidcol" in defaultargs and config.has_option(cluster_run, "iidcol")):
                 iidcol = config.get(cluster_run, "iidcol")
                 argstring = argstring+(f"--iidcol: {iidcol} (Set by loading config file)\n")
@@ -1623,11 +2325,11 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             if(config.has_option(cluster_run, "processed_ophold_file")):
                 processed_ophold_file = config.get(cluster_run, "processed_ophold_file")
                 argstring = argstring+(f"processed_ophold_file: {processed_ophold_file} (Set by loading config file)\n")
-            if config.has_option(cluster_run, "runLPRonly"):    
-                runLPRonly = config.get(cluster_run, "runLPRonly")
+            if "--LPR" in defaultargs and config.has_option(cluster_run, "runLPRonly"):
+                runLPRonly = _as_bool(config.get(cluster_run, "runLPRonly"))
                 argstring = argstring+(f"--LPR: {runLPRonly} (Set by loading config file)\n")
-            if config.has_option(cluster_run, "runPSYKonly"):       
-                runPSYKonly = config.get(cluster_run, "runPSYKonly")
+            if "--PSYK" in defaultargs and config.has_option(cluster_run, "runPSYKonly"):
+                runPSYKonly = _as_bool(config.get(cluster_run, "runPSYKonly"))
                 argstring = argstring+(f"--PSYK: {runPSYKonly} (Set by loading config file)\n")
             if("--DateFormat" in defaultargs and config.has_option(cluster_run, "DateFormat")):
                 DateFormat = config.get(cluster_run, "DateFormat")
@@ -1668,6 +2370,15 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             if("--verylowmem" in defaultargs and config.has_option(cluster_run, "verylowmem")):
                 verylowMem = config.get(cluster_run, "verylowmem")
                 argstring = argstring+(f"--verylowmem: {verylowMem} (Set by loading config file)\n")
+            if("--MinMaxAgeDeath" in defaultargs and config.has_option(cluster_run, "MinMaxAgeDeath")):
+                MinMaxAgeDeath = config.get(cluster_run, "MinMaxAgeDeath")
+                argstring = argstring+(f"--MinMaxAgeDeath: {MinMaxAgeDeath} (Set by loading config file)\n")
+            if("--keepAlive" in defaultargs and config.has_option(cluster_run, "keepAlive")):
+                keepAlive = _as_bool(config.get(cluster_run, "keepAlive"))
+                argstring = argstring+(f"--keepAlive: {keepAlive} (Set by loading config file)\n")
+            if("--onlyDead" in defaultargs and config.has_option(cluster_run, "onlyDead")):
+                onlyDead = _as_bool(config.get(cluster_run, "onlyDead"))
+                argstring = argstring+(f"--onlyDead: {onlyDead} (Set by loading config file)\n")
             if("--batchsize" in defaultargs and config.has_option(cluster_run, "batchsize")):
                 batchsize = config.get(cluster_run, "batchsize")
                 argstring = argstring+(f"--batchsize: {batchsize} (Set by loading config file)\n")
@@ -1675,8 +2386,8 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 icdprefix = config.get(cluster_run, "icdprefix")
                 argstring = argstring+(f"--icdprefix: {icdprefix} (Set by loading config file)\n")
             if("--iidstatus" in defaultargs and config.has_option(cluster_run, "iidstatus")):
-                iidstatus = config.get(cluster_run, "iidstatus")
-                argstring = argstring+(f"--iidstatus: {iidstatus} (Set by loading config file)\n")
+                iidstatus_col = config.get(cluster_run, "iidstatus")
+                argstring = argstring+(f"--iidstatus: {iidstatus_col} (Set by loading config file)\n")
             if("--iidstatusdate" in defaultargs and config.has_option(cluster_run, "iidstatusdate")):
                 iidstatusdate = config.get(cluster_run, "iidstatusdate")
                 argstring = argstring+(f"--iidstatusdate: {iidstatusdate} (Set by loading config file)\n")
@@ -1686,6 +2397,27 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             # Continue similarly for other sections or add logic to choose the right one.
     lowMem = str(lowMem).strip().lower() in ("true", "1", "yes")
     verylowMem = str(verylowMem).strip().lower() in ("true", "1", "yes")
+    runLPRonly = _as_bool(runLPRonly)
+    runPSYKonly = _as_bool(runPSYKonly)
+    keepAlive = _as_bool(keepAlive)
+    onlyDead = _as_bool(onlyDead)
+    _parse_age_range(MinMaxAgeDeath, "MinMaxAgeDeath")
+    if runLPRonly and runPSYKonly:
+        logger.error("[main] --LPR and --PSYK cannot be enabled together")
+        if not verbose:
+            print("[main] ERROR: --LPR and --PSYK cannot be enabled together")
+        sys.exit(1)
+    if ipsych_options["enabled"]:
+        if iidstatus_col:
+            ipsych_options["status_col"] = iidstatus_col
+        if iidstatusdate:
+            ipsych_options["status_date_col"] = iidstatusdate
+    ipsych_options.update({
+        "deathdate_col": deathdatecol,
+        "death_age_range": MinMaxAgeDeath,
+        "keep_alive": keepAlive,
+        "only_dead": onlyDead,
+    })
     if verylowMem and not lowMem:
         lowMem = True
     if IndexDtypes != "":
@@ -1718,24 +2450,47 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         DayFirst=True
     logger.info(f"[main] DayFirst: {DayFirst}; DateFormat {DateFormat}")
 
-    #TODO: replace when using our own files where we have the source indicated.
-    if runLPRonly:
-        file_paths = lpr_file.split(',') if ',' in lpr_file else [lpr_file]
-        if (len(file_paths) == 2):
-            lpr_file = file_paths[1] #Use the second file - by convention, this should be LPR
-        if(lpr2nd_file != ""):
-            file_paths = lpr2nd_file.split(',') if ',' in lpr2nd_file else [lpr2nd_file]
-            if (len(file_paths) == 2):
-                lpr2nd_file = file_paths[1]
+    # In legacy two-source protocols, PSYK is first and LPR is second.
+    lpr_canonical_columns = {}
+    if runLPRonly or runPSYKonly:
+        selected_index = 1 if runLPRonly else 0
+        original_paths = _split_input_paths(lpr_file)
+        original_columns = {
+            "diagnostic_col": diagnostic_col,
+            "iidcol": iidcol,
+            "input_date_in_name": input_date_in_name,
+            "input_date_out_name": input_date_out_name,
+            "ctype_col": ctype_col,
+            "lpr_recnummer": lpr_recnummer,
+        }
+        if len(original_paths) == 2:
+            for option, value in original_columns.items():
+                names = _split_lpr_column_spec(value)
+                if len(names) == len(original_paths) and names[selected_index]:
+                    lpr_canonical_columns[option] = names[0]
+        lpr_file, selected_columns = _select_input_file_variant(
+            lpr_file,
+            selected_index,
+            original_columns,
+        )
+        diagnostic_col = selected_columns["diagnostic_col"]
+        iidcol = selected_columns["iidcol"]
+        input_date_in_name = selected_columns["input_date_in_name"]
+        input_date_out_name = selected_columns["input_date_out_name"]
+        ctype_col = selected_columns["ctype_col"]
+        lpr_recnummer = selected_columns["lpr_recnummer"]
 
-    if runPSYKonly:
-        file_paths = lpr_file.split(',') if ',' in lpr_file else [lpr_file]
-        if (len(file_paths) == 2):
-            lpr_file = file_paths[0] #Use the first file - by convention, this should be PSYK
-        if(lpr2nd_file != ""):
-            file_paths = lpr2nd_file.split(',') if ',' in lpr2nd_file else [lpr2nd_file]
-            if (len(file_paths) == 2):
-                lpr2nd_file = file_paths[0]
+        if lpr2nd_file:
+            lpr2nd_file, selected_secondary_columns = _select_input_file_variant(
+                lpr2nd_file,
+                selected_index,
+                {
+                    "diagnostic2nd_col": diagnostic2nd_col,
+                    "lpr2nd_recnummer": lpr2nd_recnummer,
+                },
+            )
+            diagnostic2nd_col = selected_secondary_columns["diagnostic2nd_col"]
+            lpr2nd_recnummer = selected_secondary_columns["lpr2nd_recnummer"]
 
     if (test_run):
         use_predefined_exdep_exclusions = True
@@ -1754,12 +2509,55 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         input_date_out_name = "date_out"
         general_exclusions = ""
         qced_iids = ""
+        lpr_canonical_columns = {}
+
+    try:
+        lpr_schema = build_lpr_input_schema(
+            lpr_file=lpr_file,
+            diagnostic_col=diagnostic_col,
+            iidcol=iidcol,
+            input_date_in_name=input_date_in_name,
+            input_date_out_name=input_date_out_name,
+            ctype_col=ctype_col,
+            lpr_recnummer=lpr_recnummer,
+        )
+    except ValueError as exc:
+        logger.error(f"[main] Invalid per-file -f column mapping: {exc}")
+        if not verbose:
+            print(f"[main] ERROR: {exc}")
+        sys.exit(1)
+
+    for option, canonical in lpr_canonical_columns.items():
+        if option in lpr_schema["columns"]:
+            lpr_schema["columns"][option]["canonical"] = canonical
+
+    diagnostic_col = _lpr_schema_value(lpr_schema, "diagnostic_col", diagnostic_col)
+    iidcol = _lpr_schema_value(lpr_schema, "iidcol", iidcol)
+    input_date_in_name = _lpr_schema_value(lpr_schema, "input_date_in_name", input_date_in_name)
+    input_date_out_name = _lpr_schema_value(lpr_schema, "input_date_out_name", input_date_out_name)
+    ctype_col = _lpr_schema_value(lpr_schema, "ctype_col", ctype_col)
+    lpr_recnummer = _lpr_schema_value(lpr_schema, "lpr_recnummer", lpr_recnummer)
+    if IndexDtypes == "":
+        index_dtypes = {
+            iidcol: "int",
+            "c_pattype": "float",
+            diagnostic_col: "string",
+            "c_diagtype": "string",
+            "register": "string",
+            "source": "string",
+            input_date_in_name: "datetime64[ns]",
+            input_date_out_name: "datetime64[ns]",
+        }
 
     
     print(hostname+"; TestRun: "+str(test_run)+"; Cluster: "+cluster_run)
 
     # Set some potential columns that could contain dates
-    potential_cols_to_read_as_date = [input_date_in_name,input_date_out_name,birthdatecol,"date_in","date_out","birthdate","date_of_birth","statd","fdato","d_inddto","d_uddto","fdato_m","fdato_f","statd_m","statd_f"]
+    potential_cols_to_read_as_date = [input_date_in_name,input_date_out_name,birthdatecol,deathdatecol,"date_in","date_out","birthdate","date_of_birth","statd","fdato","d_inddto","d_uddto","fdato_m","fdato_f","statd_m","statd_f"]
+    potential_cols_to_read_as_date = [col for col in potential_cols_to_read_as_date if col]
+    for option in ("input_date_in_name", "input_date_out_name"):
+        if option in lpr_schema["columns"]:
+            potential_cols_to_read_as_date.extend(lpr_schema["columns"][option]["sources"])
     potential_lpr_cols_to_read_as_date = potential_cols_to_read_as_date
     if (not lpr_cols_to_read_as_date):
         logger.info("[main] no -f dates supplied, checking predefined colnames.")
@@ -1806,18 +2604,34 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             print(f"[main] ERROR during input preflight: {exc}")
         sys.exit(1)
 
+    validate_lpr_input_schema_headers(lpr_schema, input_headers.get("lpr_file", []))
+
+    if ipsych_options["enabled"]:
+        for file_info in input_headers.get("stam_file", []):
+            if birthdatecol not in file_info["columns"] and "birthdate" not in file_info["columns"]:
+                raise ValueError(
+                    "iPSYCH comparison requires the configured birthdate column in every "
+                    f"STAM file. Missing '{birthdatecol}' in {file_info['path']}."
+                )
+
     if verbose:
         logger.info("[main] Mem before loading all input:")
         usage()
 
     if BuildIndex:
         print("[main] Building Index")
-        index_diag_file(
-            input_csv=lpr_file,
-            separator=fsep,
-            index_columns=[iidcol,diagnostic_col],
-            dtypes = index_dtypes
-        )
+        for index, path in enumerate(lpr_schema["paths"]):
+            file_iidcol = lpr_schema["columns"]["iidcol"]["sources"][index]
+            file_diagcol = lpr_schema["columns"]["diagnostic_col"]["sources"][index]
+            missing_index_columns = [col for col in (file_iidcol, file_diagcol) if not col]
+            if missing_index_columns:
+                raise ValueError(f"Cannot index {path}: IID and diagnosis columns are required")
+            index_diag_file(
+                input_csv=path,
+                separator=fsep,
+                index_columns=[file_iidcol, file_diagcol],
+                dtypes=index_dtypes,
+            )
         if (atc_file != ""):
             index_diag_file(atc_file,fsep,atc_diag_col)
         if (lpr2nd_file != ""):
@@ -1917,17 +2731,70 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                     except TypeError:
                         ophold = pd.read_csv(processed_ophold_file, engine='python', sep=opholdsep, dtype=object)
                     df3 = pd.merge(df3,ophold,how="left", on=iidcol)
-        n_stam_iids = df3[iidcol].nunique()
-        gc.collect()
         # Initialize the additional data file
         df4 = pd.DataFrame()
         # Load the fourth file as a DataFrame(should be a file with additional rows of information. This will not be merged but appended to df1) 
         if (addition_information_file != ''):
-            df4 = load_data_file(data_file=addition_information_file, sep=jsep, birthdatecol=birthdatecol, diagnostic_col=diagnostic_col, sexcol = sexcol, stam_cols_to_read_as_date = stam_cols_to_read_as_date, iidcol=iidcol)
+            df4 = load_additional_information_files(
+                data_file=addition_information_file,
+                sep=jsep,
+                birthdatecol=birthdatecol,
+                diagnostic_col=diagnostic_col,
+                sexcol=sexcol,
+                stam_cols_to_read_as_date=stam_cols_to_read_as_date,
+                iidcol=iidcol,
+            )
             if(("birthdate" in df3.columns) and "birthdate" in df4.columns):# or "birthdate" in df1.columns) and "birthdate" in df4.columns):
                 df4.drop("birthdate",inplace=True, axis=1)
             if(("diagnosis" in df3.columns) and "diagnosis" in df4.columns):# or "diagnosis" in df1.columns) and "diagnosis" in df4.columns):
                 df4.drop("diagnosis",inplace=True, axis=1)
+        if ipsych_options["enabled"]:
+            try:
+                df3, df4 = restrict_ipsych_iid_inputs(
+                    df3,
+                    df4,
+                    iidcol=iidcol,
+                    birthdatecol=birthdatecol,
+                    options=ipsych_options,
+                )
+            except ValueError as exc:
+                logger.error(f"[main] ERROR applying iPSYCH comparison cohort restrictions: {exc}")
+                if not verbose:
+                    print(f"[main] ERROR applying iPSYCH comparison cohort restrictions: {exc}")
+                raise
+            if df3.empty:
+                raise ValueError(
+                    "iPSYCH comparison restrictions removed every IID from the STAM file."
+                )
+        elif (
+            deathdatecol
+            or _parse_age_range(MinMaxAgeDeath, "MinMaxAgeDeath") != (0, 0)
+            or keepAlive
+            or onlyDead
+        ):
+            df3, df4 = restrict_iid_inputs_by_death(
+                df3,
+                df4,
+                iidcol=iidcol,
+                birthdatecol=birthdatecol,
+                deathdatecol=deathdatecol,
+                min_max_age_death=MinMaxAgeDeath,
+                keep_alive=keepAlive,
+                only_dead=onlyDead,
+            )
+            if df3.empty:
+                raise ValueError("Death filters removed every IID from the STAM file.")
+
+        status_renames = {}
+        if iidstatus_col and iidstatus_col in df4.columns:
+            status_renames[iidstatus_col] = "C_STATUS"
+        if iidstatusdate and iidstatusdate in df4.columns:
+            status_renames[iidstatusdate] = "C_STATUS_DATE"
+        if status_renames:
+            df4.rename(columns=status_renames, inplace=True)
+
+        n_stam_iids = df3[iidcol].nunique()
+        gc.collect()
         #in_pheno_codes, normalized_pheno = dict_update_icd_coding(in_pheno_codes, exact_match, skip_icd_update, remove_point_in_diag_request, ICDCM, noLeadingICD, icdprefix)
         pheno_request = in_pheno_codes
         if (use_predefined_exdep_exclusions):
@@ -2041,27 +2908,27 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             iids = normalize_iid_series(pd.Series(iids))
             #iids = pd.to_numeric(pd.Series(iids), errors="coerce").dropna().astype(int).tolist()
 
-        if os.path.exists(lpr_file.rpartition('.')[0] + ".h5"):
+        if len(lpr_schema["paths"]) == 1 and os.path.exists(lpr_schema["paths"][0].rpartition('.')[0] + ".h5"):
             h5_exist = True
-            h5_file = lpr_file.rpartition('.')[0] + ".h5"
+            h5_file = lpr_schema["paths"][0].rpartition('.')[0] + ".h5"
             logger.info("[main] Identified an available h5 indexed input for the lpr -f file.")
             if not verbose:
                 print("[main] Identified an indexed h5 input for -f file")
         pheno_requests = []
         pheno_requests_normalized = []
         pheno_requests_normalized.extend(set(map(str,normalized_pheno)))
-        pheno_requests.extend(set(map(str, in_pheno_codes.iloc[0]["Disorder Codes"])))
+        pheno_requests.extend(flatten_disorder_codes(in_pheno_codes))
         if not lifetime_exclusions.empty:
-            pheno_requests.extend(set(map(str, lifetime_exclusions.iloc[0]["Disorder Codes"])))
+            pheno_requests.extend(flatten_disorder_codes(lifetime_exclusions))
             pheno_requests_normalized.extend(set(map(str, normalized_lifetime)))
         if not oneYearPrior_exclusions.empty:
-            pheno_requests.extend(set(map(str, oneYearPrior_exclusions.iloc[0]["Disorder Codes"])))
+            pheno_requests.extend(flatten_disorder_codes(oneYearPrior_exclusions))
             pheno_requests_normalized.extend(set(map(str, normalized_prior)))
         if not post_exclusions.empty:
-            pheno_requests.extend(set(map(str, post_exclusions.iloc[0]["Disorder Codes"])))
+            pheno_requests.extend(flatten_disorder_codes(post_exclusions))
             pheno_requests_normalized.extend(set(map(str, normalized_post)))
         if not covariates.empty:
-            pheno_requests.extend(set(map(str, covariates.iloc[0]["Disorder Codes"])))
+            pheno_requests.extend(flatten_disorder_codes(covariates))
             pheno_requests_normalized.extend(set(map(str, normalized_covars)))
         if lifetime_exclusions.empty and oneYearPrior_exclusions.empty and post_exclusions.empty and covariates.empty:
             logger.info("[main] All posssible exclusions/covariates are empty (lifetime_exclusions,oneYearPrior_exclusions,post_exclusions,covariates)")
@@ -2165,7 +3032,8 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                                         write_Plink2_format=write_Plink2_format, write_fastGWA_format=write_fastGWA_format, write_pickle=write_pickle, n_stam_iids=n_stam_iids, 
                                         exclCHBcontrols=exclCHBcontrols, iidstatus_col=iidstatus_col, iidstatusdate=iidstatusdate, addition_information_file=addition_information_file, sexcol=sexcol, 
                                         input_date_in_name=input_date_in_name, input_date_out_name=input_date_out_name, append=False, icdprefix=icdprefix, noLeadingICD=noLeadingICD, 
-                                        lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions, post_exclusions=post_exclusions, covariates=covariates, lowMem=lowMem, main_pheno_name=main_pheno_name)
+                                        lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions, post_exclusions=post_exclusions, covariates=covariates, lowMem=lowMem, main_pheno_name=main_pheno_name,
+                                        ipsych_options=ipsych_options)
             elif lowMem and not verylowMem:
                 first_write = True  # Control whether to overwrite or append to the file
                 iids = df3[iidcol].unique()  # Get unique IIDs from df3
@@ -2254,7 +3122,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                     append=append_flag, icdprefix=icdprefix, noLeadingICD=noLeadingICD,
                     lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions,
                     post_exclusions=post_exclusions, covariates=covariates, lowMem=lowMem, main_pheno_name=main_pheno_name,
-                    output_columns=planned_output_columns
+                    output_columns=planned_output_columns, ipsych_options=ipsych_options
                 )
                 #End new 09.12.2025
                 # Old 01.10.2025
@@ -2378,7 +3246,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                         append=append_flag, icdprefix=icdprefix, noLeadingICD=noLeadingICD,
                         lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions,
                         post_exclusions=post_exclusions, covariates=covariates, lowMem=lowMem, main_pheno_name=main_pheno_name,
-                        output_columns=planned_output_columns
+                        output_columns=planned_output_columns, ipsych_options=ipsych_options
                     )
                     first_write = False
                 # Verify all IIDs were processed
@@ -2474,7 +3342,9 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                             iidcol = iidcol, iid_batch = iid_batch, batch_num = batch_num, sep = fsep,
                             potential_lpr_cols_to_read_as_date = potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date = lpr_cols_to_read_as_date,
                             verbose = verbose, dta_input = dta_input, DateFormat = DateFormat, diagnostic_col = diagnostic_col, diagnostic2nd_col = diagnostic2nd_col,
-                            filter_on_diagcol = False, diags = flattened_pheno_requests) #diags = in_pheno_codes)
+                            filter_on_diagcol = False, diags = flattened_pheno_requests, lpr_schema=lpr_schema,
+                            input_date_in_name=input_date_in_name, input_date_out_name=input_date_out_name,
+                            ctype_col=ctype_col) #diags = in_pheno_codes)
                 gc.collect()
                 logger.info(f"[main] After batch loading lpr file for batch {batch_num + 1} with df1.head(5):{df1.head(5)}; df3backup:{df3backup}; df3backup[df3backup[iidcol].isin(iid_batch)]:{df3backup[df3backup[iidcol].isin(iid_batch)].head(5)}; iid_batch: {iid_batch[:5]}; iidcol:{iidcol}")
                 if not verbose:
@@ -2535,7 +3405,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                                          exclCHBcontrols=exclCHBcontrols, iidstatus_col=iidstatus_col, iidstatusdate=iidstatusdate, addition_information_file=addition_information_file, sexcol=sexcol, 
                                          input_date_in_name=input_date_in_name, input_date_out_name=input_date_out_name, append=append_flag, icdprefix=icdprefix, noLeadingICD=noLeadingICD,
                                          lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions, post_exclusions=post_exclusions, covariates=covariates, lowMem=lowMem, main_pheno_name=main_pheno_name,
-                                         output_columns=planned_output_columns)
+                                         output_columns=planned_output_columns, ipsych_options=ipsych_options)
                 first_write = False
             # Verify all IIDs were processed
             missing_iids = set(iids_list) - processed_iids
@@ -2549,7 +3419,9 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             df1 = process_lpr_data(
                 lpr_file, lpr2nd_file, dta_input, fsep, lpr_cols_to_read_as_date, 
                 DateFormat, potential_lpr_cols_to_read_as_date, diagnostic_col, diagnostic2nd_col, 
-                lpr_recnummer, lpr2nd_recnummer, iidcol = iidcol
+                lpr_recnummer, lpr2nd_recnummer, iidcol=iidcol, lpr_schema=lpr_schema,
+                input_date_in_name=input_date_in_name, input_date_out_name=input_date_out_name,
+                ctype_col=ctype_col,
             )
             
             df1 = finalize_lpr_data(df1=df1, diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col, verbose=verbose)
@@ -2598,7 +3470,8 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                                          write_Plink2_format=write_Plink2_format, write_fastGWA_format=write_fastGWA_format, write_pickle=write_pickle, n_stam_iids=n_stam_iids, 
                                          exclCHBcontrols=exclCHBcontrols, iidstatus_col=iidstatus_col, iidstatusdate=iidstatusdate, addition_information_file=addition_information_file, sexcol=sexcol, 
                                          input_date_in_name=input_date_in_name, input_date_out_name=input_date_out_name, append=False, icdprefix=icdprefix, noLeadingICD=noLeadingICD,
-                                        lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions, post_exclusions=post_exclusions, covariates=covariates, lowMem=lowMem, main_pheno_name=main_pheno_name)
+                                        lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions, post_exclusions=post_exclusions, covariates=covariates, lowMem=lowMem, main_pheno_name=main_pheno_name,
+                                        ipsych_options=ipsych_options)
 
         
     logger.info("[main] Finished the Phenotype definition(s). Producing checksums")
@@ -3208,7 +4081,9 @@ def build_temp_file(file_path, row_indices, temp_file="filtered_temp.csv", index
 def batch_load_lprfile(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnummer,
                        iidcol, iid_batch, batch_num, sep,
                        potential_lpr_cols_to_read_as_date, lpr_cols_to_read_as_date,
-                       verbose, dta_input, DateFormat, diagnostic_col, diagnostic2nd_col, filter_on_diagcol=False, diags=""):
+                       verbose, dta_input, DateFormat, diagnostic_col, diagnostic2nd_col,
+                       filter_on_diagcol=False, diags="", lpr_schema=None,
+                       input_date_in_name="", input_date_out_name="", ctype_col=""):
     """
     Robust batch loader:
      - determine df1_rows_to_keep via load_mapping_rows
@@ -3219,7 +4094,16 @@ def batch_load_lprfile(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnummer
     if verbose:
         logger.info(f"[batch_load_lprfile] Processing batch {batch_num} for {len(iid_batch) if iid_batch is not None else 'all'} IIDs")
 
-    df1_rows_to_keep = None
+    if lpr_schema is None:
+        lpr_schema = build_lpr_input_schema(
+            lpr_file=lprfile,
+            diagnostic_col=diagnostic_col,
+            iidcol=iidcol,
+            input_date_in_name=input_date_in_name,
+            input_date_out_name=input_date_out_name,
+            ctype_col=ctype_col,
+            lpr_recnummer=lpr_recnummer,
+        )
 
     advanced_detected = False
     try:
@@ -3230,46 +4114,61 @@ def batch_load_lprfile(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnummer
     except Exception:
         advanced_detected = False
 
-    # decide which mapping to use
-    if filter_on_diagcol:
-        if advanced_detected:
-            # cannot prefilter by line numbers for advanced diagnostics -> do not prefilter
-            df1_rows_to_keep = None
+    filter_option = "diagnostic_col" if filter_on_diagcol else "iidcol"
+    targets = diags if filter_on_diagcol else iid_batch
+    selected_indexes = []
+    selected_paths = []
+    temporary_paths = []
+    for file_index, source_path in enumerate(lpr_schema["paths"]):
+        source_column = lpr_schema["columns"][filter_option]["sources"][file_index]
+        if not source_column:
+            continue
+        if filter_on_diagcol and advanced_detected:
+            rows_to_keep = None
             if verbose:
-                logger.info("[batch_load_lprfile] advanced diagnostics detected -> skipping prefiltering by diag")
+                logger.info("[batch_load_lprfile] advanced diagnostics detected -> skipping diagnosis prefilter")
+        elif targets is None or len(targets) == 0:
+            rows_to_keep = None
         else:
-            df1_rows_to_keep = load_mapping_rows(lprfile, diagnostic_col, diags, sep=sep, suffix_search=False, verbose=verbose)
-    else:
-        # filtering by iid for this batch
-        if iid_batch is None or len(iid_batch) == 0:
-            df1_rows_to_keep = None
-        else:
-            df1_rows_to_keep = load_mapping_rows(lprfile, iidcol, iid_batch, sep=sep, suffix_search=False, verbose=verbose)
+            rows_to_keep = load_mapping_rows(
+                source_path, source_column, targets, sep=sep,
+                suffix_search=False, verbose=verbose,
+            )
+        if isinstance(rows_to_keep, list) and not rows_to_keep:
+            continue
+        selected_path = source_path
+        if isinstance(rows_to_keep, list):
+            selected_path = f"{uuid.uuid4().hex[:8]}.filtered_temp.csv"
+            selected_path = build_temp_file(
+                source_path, rows_to_keep, temp_file=selected_path, verbose=verbose
+            )
+            if not selected_path:
+                continue
+            temporary_paths.append(selected_path)
+        selected_indexes.append(file_index)
+        selected_paths.append(selected_path)
 
-    # Interpret the result
-    if isinstance(df1_rows_to_keep, list) and len(df1_rows_to_keep) == 0:
+    if not selected_paths:
         if verbose:
-            logger.info(f"[batch_load_lprfile] No rows to keep for batch {batch_num} -> returning empty DataFrame")
-        return pd.DataFrame()  # nothing to process for this batch
+            logger.info(f"[batch_load_lprfile] No rows to keep for batch {batch_num}")
+        return pd.DataFrame()
 
-    # If df1_rows_to_keep is None -> use full file
-    temp_file = None
-    if isinstance(df1_rows_to_keep, list):
-        temp_file = f"{uuid.uuid4().hex[:6]}.filtered_temp.csv"
-        out_temp = build_temp_file(lprfile, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
-        if out_temp == "":
-            if verbose:
-                logger.info(f"[batch_load_lprfile] build_temp_file returned empty -> no rows to process in batch {batch_num}")
-            return pd.DataFrame()
-        lprfile_to_use = out_temp
+    filtered_schema = subset_lpr_input_schema(
+        lpr_schema, selected_indexes, selected_paths
+    )
+    secondary_paths = _split_input_paths(lpr2nd_file)
+    if secondary_paths:
+        if len(secondary_paths) != len(lpr_schema["paths"]):
+            raise ValueError("The number of --f2 files must match the number of -f files")
+        filtered_secondary = ",".join(secondary_paths[index] for index in selected_indexes)
     else:
-        lprfile_to_use = lprfile
+        filtered_secondary = ""
 
     # Delegate to the main lpr parser/merger
     try:
         df_new = process_lpr_data(
-            lpr_file=lprfile_to_use,
-            lpr2nd_file=lpr2nd_file,
+            lpr_file=",".join(selected_paths),
+            lpr2nd_file=filtered_secondary,
             dta_input=dta_input,
             sep=sep,
             lpr_cols_to_read_as_date=lpr_cols_to_read_as_date,
@@ -3279,13 +4178,16 @@ def batch_load_lprfile(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnummer
             diagnostic2nd_col=diagnostic2nd_col,
             lpr_recnummer=lpr_recnummer,
             lpr2nd_recnummer=lpr2nd_recnummer,
-            iidcol = iidcol
+            iidcol=iidcol,
+            lpr_schema=filtered_schema,
+            input_date_in_name=input_date_in_name,
+            input_date_out_name=input_date_out_name,
+            ctype_col=ctype_col,
         )
     finally:
-        # cleanup temp file if created
-        if isinstance(df1_rows_to_keep, list) and lprfile_to_use != lprfile and os.path.exists(lprfile_to_use):
+        for temporary_path in temporary_paths:
             try:
-                os.remove(lprfile_to_use)
+                os.remove(temporary_path)
             except Exception:
                 pass
 
@@ -3583,6 +4485,7 @@ def build_expected_output_columns(
     schema = []
     schema.extend(_column_list(df3_columns))
     schema.extend([c for c in _column_list(df4_columns) if c not in schema])
+    schema = group_cohort_columns(schema)
 
     if sexcol and sexcol != "sex":
         schema.append("sex")
@@ -3644,7 +4547,8 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                                  in_pheno_codes, pheno_requestcol, diagnostic_col, atc_diag_col, birthdatecol, atc_date_col, atc_cols_to_read_as_date, atc_file, sep, 
                                  BuildEntryExitDates, lifetime_exclusions_file, post_exclusions_file, oneYearPrior_exclusions_file, outfile, write_Plink2_format, 
                                  write_fastGWA_format, write_pickle, n_stam_iids, exclCHBcontrols, iidstatus_col, iidstatusdate, addition_information_file, sexcol, input_date_in_name, 
-                                 input_date_out_name, append, df4, icdprefix, noLeadingICD, lifetime_exclusions, oneYearPrior_exclusions, post_exclusions, covariates, lowMem, main_pheno_name, output_columns=None):
+                                 input_date_out_name, append, df4, icdprefix, noLeadingICD, lifetime_exclusions, oneYearPrior_exclusions, post_exclusions, covariates, lowMem, main_pheno_name, output_columns=None,
+                                 ipsych_options=None):
     global extra_cols_to_keep
     df3_cols = []
     df4_cols = []
@@ -3691,6 +4595,15 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         logger.info(f"[process_pheno_and_exclusions] Correcting n_stam_iids from {n_stam_iids} to current batch size {batch_n_iids}.")
         n_stam_iids = batch_n_iids
     df1 = enforce_iid_universe(df1, iidcol, batch_iid_set, "df1 at process start")
+    ipsych_options = normalize_ipsych_comparison_options(ipsych_options)
+    if ipsych_options["enabled"]:
+        df1 = filter_records_to_ipsych_date_window(
+            df1,
+            input_date_in_name=input_date_in_name,
+            input_date_out_name=input_date_out_name,
+            options=ipsych_options,
+            label="diagnosis",
+        )
     if df4 is not None and not df4.empty:
         df4 = enforce_iid_universe(df4, iidcol, batch_iid_set, "df4 at process start", unique_iids=True)
     qced_iids_to_keep = pd.DataFrame(columns=[iidcol])
@@ -3871,6 +4784,14 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
             if("diagnosis" in atc_df1.columns and atc_diag_col != "diagnosis"):
                 atc_df1.rename(columns={"diagnosis":atc_diag_col},inplace=True)
                 logger.info(f"[process_pheno_and_exclusions] after renaming diagnosis column to {atc_diag_col} atc_df1.columns: {atc_df1.columns}")
+            if ipsych_options["enabled"]:
+                atc_df1 = filter_records_to_ipsych_date_window(
+                    atc_df1,
+                    input_date_in_name=atc_date_col,
+                    input_date_out_name=atc_date_col,
+                    options=ipsych_options,
+                    label="ATC",
+                )
             atc_df1 = enforce_iid_universe(atc_df1, iidcol, batch_iid_set, "atc_df1")
             logger.info(f"[process_pheno_and_exclusions] after finalize_lpr_data; atc_df1.columns: {atc_df1.columns}")
             logger.info(f"[process_pheno_and_exclusions] atc_df1.head(5): {atc_df1.head(5)}")
@@ -4406,12 +5327,6 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         usage()
     else:
         gc.collect()
-    if (iidstatus_col != ""):
-        if (iidstatus_col in df4):
-            df4.rename(columns={iidstatus_col: "C_STATUS"}, inplace=True)
-    if (iidstatusdate != ""):
-        if (iidstatus_col in df4):
-            df4.rename(columns={iidstatus_col: "C_STATUS_DATE"}, inplace=True)
     if (addition_information_file != ''):
         logger.info(f"df4 cols: {df4.columns}")
         try:
@@ -4528,14 +5443,13 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         final_df['Level2_FirstDx'] = final_df['Level2_FirstDx'].apply(lambda lst: ','.join(map(str, sorted(lst))))
         #final_df['Level2_ExclusionReason'] = final_df['Level2_ExclusionReason'].apply(sorted)
         #final_df['Level2_FirstDx'] = final_df['Level2_FirstDx'].apply(sorted)
-    final_df = add_chb_degen_compat_columns(final_df)
-    chb_mask = cohort_membership_mask(final_df, ["chb", "degen", "degen_new", "degen_old"])
+    chb_mask = cohort_membership_mask(final_df, CHB_EQUIVALENT_COLUMNS)
     dbds_mask = cohort_membership_mask(final_df, ["dbds"])
-    has_chb_dbds_columns = "dbds" in final_df.columns and any(col in final_df.columns for col in ["chb", "degen", "degen_new", "degen_old"])
+    has_chb_dbds_columns = "dbds" in final_df.columns and any(col in final_df.columns for col in CHB_EQUIVALENT_COLUMNS)
     if has_chb_dbds_columns:
         n_before = len(final_df.index)
         final_df = final_df.loc[dbds_mask | chb_mask].copy()
-        chb_mask = cohort_membership_mask(final_df, ["chb", "degen", "degen_new", "degen_old"])
+        chb_mask = cohort_membership_mask(final_df, CHB_EQUIVALENT_COLUMNS)
         dbds_mask = cohort_membership_mask(final_df, ["dbds"])
         n_after = len(final_df.index)
         logger.info(f"[process_pheno_and_exclusions] Excluding {str(n_before - n_after)} Individuals as they are not part of CHB or DBDS.")
@@ -4546,7 +5460,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         all_controls = len(final_df.loc[((final_df['diagnosis'] == "Control") | (final_df['diagnosis'] == "Non-case")), iidcol])
         final_df = final_df[~final_df[iidcol].isin(iids_to_exclude_CHB_controls)]
         logger.info(f"[process_pheno_and_exclusions] Excluding {str(len(iids_to_exclude_CHB_controls))} CHB controls (of {all_controls} controls), as we are not allowed to use them.")
-        chb_mask = cohort_membership_mask(final_df, ["chb", "degen", "degen_new", "degen_old"])
+        chb_mask = cohort_membership_mask(final_df, CHB_EQUIVALENT_COLUMNS)
         dbds_mask = cohort_membership_mask(final_df, ["dbds"])
     final_df = enforce_iid_universe(final_df, iidcol, batch_iid_set, "final_df before reported counts", unique_iids=True)
     # Printing a warning, that one should take care and check that the used phenotype is well within their protocol and otherwise they will need to exclude all CHB Non-cases.
@@ -4637,27 +5551,46 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     if "fkode" in final_df.columns:
         logger.info("[process_pheno_and_exclusions] Updating Information about DK born or not. This uses the selected country numbers used by Oleguer Plana-Ripoll https://osf.io/zhfyp/files/2cyvs on the fkode/fkode_m/fkode_f. Find more details here https://www.dst.dk/da/Statistik/dokumentation/Times/cpr-oplysninger/foedreg-kode")
         try:
-            final_df['both_parents_DK'] = False
-            final_df['fkode_m'] = pd.to_numeric(final_df['fkode_m'], errors='coerce')
-            final_df['fkode_f'] = pd.to_numeric(final_df['fkode_f'], errors='coerce')
             final_df['fkode'] = pd.to_numeric(final_df['fkode'], errors='coerce')
-            final_df.loc[
-                    (BirthCountry_DK(final_df['fkode_m']) == "Denmark") & 
-                    (BirthCountry_DK(final_df['fkode_f']) == "Denmark") , 
-                    'both_parents_DK'
-                ] = True
-            final_df._consolidate_inplace()
             final_df['DK_born'] = False
-            final_df.loc[(BirthCountry_DK(final_df['fkode']) == "Denmark"), 'DK_born'] = True
+            if ipsych_options["enabled"]:
+                final_df.loc[_ipsych_danish_birthplace_mask(final_df['fkode']), 'DK_born'] = True
+            else:
+                final_df.loc[(BirthCountry_DK(final_df['fkode']) == "Denmark"), 'DK_born'] = True
+            if {"fkode_m", "fkode_f"}.issubset(final_df.columns):
+                final_df['both_parents_DK'] = False
+                final_df['fkode_m'] = pd.to_numeric(final_df['fkode_m'], errors='coerce')
+                final_df['fkode_f'] = pd.to_numeric(final_df['fkode_f'], errors='coerce')
+                final_df.loc[
+                        (BirthCountry_DK(final_df['fkode_m']) == "Denmark") &
+                        (BirthCountry_DK(final_df['fkode_f']) == "Denmark"),
+                        'both_parents_DK'
+                    ] = True
+            final_df._consolidate_inplace()
         except Exception as e:
-            logger.info(f"""[process_pheno_and_exclusions] An error occurred while mapping final_df['fkode','fkode_m','fkode_f'].\n
-                        Head of the file:\n{final_df[['fkode','fkode_m', 'fkode_f']].head(5)}\n
-                        Error message: {e}""")
+            available_fkode_cols = [
+                col for col in ("fkode", "fkode_m", "fkode_f") if col in final_df.columns
+            ]
+            logger.info(
+                "[process_pheno_and_exclusions] An error occurred while mapping %s. "
+                "Head of available columns:\n%s\nError message: %s",
+                available_fkode_cols,
+                final_df[available_fkode_cols].head(5),
+                e,
+            )
     source_detail_cols = [
         col for col in (NON_ATC_EXTRA_COLUMNS + ATC_EXTRA_COLUMNS)
         if col not in list(df3_cols) and col not in df4_cols
     ]
     final_df.drop(columns=STANDARD_PHENO_DETAIL_COLS + source_detail_cols, inplace=True, errors="ignore")
+    source_input_cols = set(list(df3_cols) + list(df4_cols))
+    synthetic_cohort_cols = [
+        col for col in COHORT_MEMBERSHIP_COLUMNS
+        if col in final_df.columns and col not in source_input_cols
+    ]
+    if synthetic_cohort_cols:
+        logger.info(f"[process_pheno_and_exclusions] Dropping cohort alias columns not present in -i/-j input headers: {synthetic_cohort_cols}")
+        final_df.drop(columns=synthetic_cohort_cols, inplace=True, errors="ignore")
     write_mode, write_header = ('w', True)
     if append:
         write_mode, write_header = ('a', False)
@@ -4721,6 +5654,15 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     if missing:
         final_df = pd.concat([final_df, pd.DataFrame(missing, index=final_df.index)], axis=1)
     final_df = final_df.reindex(columns=col_order)
+    count_cols = [
+        col for col in final_df.columns
+        if col.endswith(("_n_diags", "_n_unique_in_days"))
+    ]
+    for col in count_cols:
+        numeric = pd.to_numeric(final_df[col], errors="coerce")
+        final_df[col] = numeric.map(
+            lambda value: "" if pd.isna(value) else f"{float(value):.1f}"
+        )
     final_df = sanitize_tsv_cells(final_df)
     if len(final_df.columns) != len(col_order):
         raise ValueError(f"[process_pheno_and_exclusions] Output schema mismatch before writing: dataframe has {len(final_df.columns)} columns, schema has {len(col_order)} columns.")
@@ -6030,31 +6972,35 @@ def load_data_file(
         if dta_input:
             df = pd.read_stata(path)
         else:
-            # discover columns
-            try:
-                hdr = pd.read_csv(path, sep=sep, nrows=0)
-            except TypeError:
-                hdr = pd.read_csv(path, sep=sep, nrows=0, engine="python")
-            if hdr.columns.empty:
+            columns = _read_input_header(path, sep=sep)
+            if not columns:
                 logger.info(f"[load_data_file] ERROR: Could not load file header: {path}")
                 sys.exit(1)
 
             # intersect requested dates with present columns
-            date_cols = [c for c in requested_dates if c in hdr.columns]
+            date_cols = [c for c in requested_dates if c in columns]
             if verbose and date_cols:
                 logger.info(f"[load_data_file] date columns in {path}: {date_cols}")
             if date_cols:
                 logger.info(f"[load_data_file] Original cols: {requested_dates}")
                 logger.info(f"[load_data_file] date columns in {path}: {date_cols}")
-                hdr2 = pd.read_csv(path, sep=sep, nrows=2)
+                preview_options = {"sep": sep, "nrows": 2}
+                if _separator_requires_python_engine(sep):
+                    preview_options["engine"] = "python"
+                hdr2 = pd.read_csv(path, **preview_options)
                 logger.info(f"[load_data_file] DayFirst = {DayFirst}; DateFormat = {DateFormat}\ndf3 before updating Dates: {hdr2}")
                 del(hdr2)
-        
-            # read with type inference
-            try:
-                df = pd.read_csv(path, sep=sep, low_memory=False)
-            except TypeError:
-                df = pd.read_csv(path, sep=sep, engine="python")
+
+            read_options = {"sep": sep}
+            if _separator_requires_python_engine(sep):
+                read_options["engine"] = "python"
+            else:
+                read_options["low_memory"] = False
+            if iidcol and iidcol in columns:
+                # Encrypted/numeric-looking IIDs must never pass through float
+                # inference, which can irreversibly lose precision before merging.
+                read_options["dtype"] = {iidcol: "string"}
+            df = pd.read_csv(path, **read_options)
 
             # robust date parsing
             for col in date_cols:
@@ -6106,11 +7052,135 @@ def load_data_file(
 
     return df3
 
-def process_lpr_data(lpr_file, lpr2nd_file, dta_input, sep, lpr_cols_to_read_as_date, DateFormat, potential_lpr_cols_to_read_as_date, diagnostic_col, diagnostic2nd_col, lpr_recnummer, lpr2nd_recnummer, iidcol):
+
+def load_additional_information_files(
+    data_file: str,
+    sep: str,
+    birthdatecol: str,
+    diagnostic_col: str,
+    sexcol: str,
+    stam_cols_to_read_as_date: Iterable[str],
+    iidcol: str,
+):
+    """Load each -j file and merge its columns by IID in the supplied order."""
+    merged = None
+    for path in _split_input_paths(data_file):
+        frame = load_data_file(
+            data_file=path,
+            sep=sep,
+            birthdatecol=birthdatecol,
+            diagnostic_col=diagnostic_col,
+            sexcol=sexcol,
+            stam_cols_to_read_as_date=stam_cols_to_read_as_date,
+            iidcol=iidcol,
+        )
+        if iidcol not in frame.columns:
+            raise ValueError(f"Additional-information file is missing IID column '{iidcol}': {path}")
+        if merged is None:
+            merged = merge_iid_metadata_frames(
+                None, frame, iidcol=iidcol, right_label=path
+            )
+            continue
+        left_iids = set(merged[iidcol].dropna().astype(str))
+        right_iids = set(frame[iidcol].dropna().astype(str))
+        logger.info(
+            "[load_additional_information_files] Merging %s: %s unique IIDs, "
+            "%s overlap with prior -j files.",
+            path,
+            len(right_iids),
+            len(left_iids.intersection(right_iids)),
+        )
+        if right_iids and not left_iids.intersection(right_iids):
+            message = (
+                f"[load_additional_information_files] WARNING: {path} has no IID overlap "
+                "with the preceding -j files after IID normalization."
+            )
+            logger.warning(message)
+            if not verbose:
+                print(message)
+        merged = merge_iid_metadata_frames(
+            merged,
+            frame,
+            iidcol=iidcol,
+            how="outer",
+            prefer="left",
+            left_label="previous -j files",
+            right_label=path,
+        )
+
+    return merged if merged is not None else pd.DataFrame()
+
+
+def load_lpr_file_with_schema(
+    path,
+    file_index,
+    schema,
+    sep,
+    lpr_cols_to_read_as_date,
+    potential_lpr_cols_to_read_as_date,
+):
+    """Load one primary diagnosis file and normalize its configured columns."""
+    requested_dates = list(lpr_cols_to_read_as_date or []) + list(
+        potential_lpr_cols_to_read_as_date or []
+    )
+    for option in ("input_date_in_name", "input_date_out_name"):
+        mapping = schema["columns"].get(option)
+        if mapping and mapping["sources"][file_index]:
+            requested_dates.append(mapping["sources"][file_index])
+
+    source_path = schema.get("source_paths", schema["paths"])[file_index]
+    frame = load_data_file(
+        data_file=path,
+        sep=sep,
+        birthdatecol="",
+        diagnostic_col="",
+        sexcol="",
+        stam_cols_to_read_as_date=requested_dates,
+        iidcol=None,
+    )
+    rename = {}
+    for option, mapping in schema["columns"].items():
+        canonical = mapping["canonical"]
+        source = mapping["sources"][file_index]
+        if source and source in frame.columns:
+            if source != canonical:
+                if canonical in frame.columns:
+                    raise ValueError(
+                        f"Cannot rename '{source}' to '{canonical}' in {source_path}: "
+                        "the canonical column already exists"
+                    )
+                rename[source] = canonical
+            continue
+        if source:
+            _warn_missing_lpr_column(schema, source_path, option, source, canonical)
+        if option in ("input_date_in_name", "input_date_out_name"):
+            frame[canonical] = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
+        else:
+            frame[canonical] = pd.Series(pd.NA, index=frame.index, dtype="string")
+    if rename:
+        frame.rename(columns=rename, inplace=True)
+
+    canonical_iid = _lpr_schema_value(schema, "iidcol")
+    if canonical_iid and canonical_iid in frame.columns:
+        frame[canonical_iid] = normalize_iid_series(frame[canonical_iid], target="str")
+    return frame
+
+
+def process_lpr_data(lpr_file, lpr2nd_file, dta_input, sep, lpr_cols_to_read_as_date, DateFormat, potential_lpr_cols_to_read_as_date, diagnostic_col, diagnostic2nd_col, lpr_recnummer, lpr2nd_recnummer, iidcol, lpr_schema=None, input_date_in_name="", input_date_out_name="", ctype_col=""):
     """
     Process the LPR data sequentially, ensuring an equal number of LPR and LPR2nd files are provided.
     """
-    file_paths = lpr_file.split(',') if ',' in lpr_file else [lpr_file]
+    if lpr_schema is None:
+        lpr_schema = build_lpr_input_schema(
+            lpr_file=lpr_file,
+            diagnostic_col=diagnostic_col,
+            iidcol=iidcol,
+            input_date_in_name=input_date_in_name,
+            input_date_out_name=input_date_out_name,
+            ctype_col=ctype_col,
+            lpr_recnummer=lpr_recnummer,
+        )
+    file_paths = lpr_schema["paths"]
     if lpr2nd_file != "":
         secondary_paths = lpr2nd_file.split(',') if ',' in lpr2nd_file else [lpr2nd_file]
     else:
@@ -6124,9 +7194,12 @@ def process_lpr_data(lpr_file, lpr2nd_file, dta_input, sep, lpr_cols_to_read_as_
     df1 = None
     logger.info(f"[process_lpr_data] LPR files {file_paths}, and 2nd diagnosis files {secondary_paths}")
     if (len(secondary_paths) > 0):
-        for lprfile, lpr2ndfile in zip(file_paths, secondary_paths):
+        for file_index, (lprfile, lpr2ndfile) in enumerate(zip(file_paths, secondary_paths)):
             logger.info(f"[process_lpr_data] Loading {lprfile}, and {lpr2ndfile}")
-            df_lpr = load_data_file(data_file=lprfile, sep=sep, birthdatecol="", diagnostic_col="", sexcol = "", stam_cols_to_read_as_date = lpr_cols_to_read_as_date + potential_lpr_cols_to_read_as_date, iidcol=iidcol)
+            df_lpr = load_lpr_file_with_schema(
+                lprfile, file_index, lpr_schema, sep,
+                lpr_cols_to_read_as_date, potential_lpr_cols_to_read_as_date,
+            )
             df_lpr2nd = load_data_file(data_file=lpr2ndfile, sep=sep, birthdatecol="", diagnostic_col="", sexcol = "", stam_cols_to_read_as_date = lpr_cols_to_read_as_date + potential_lpr_cols_to_read_as_date, iidcol=iidcol)
             df_merged = merge_secondary_diagnoses(df_lpr, df_lpr2nd, diagnostic_col, lpr_recnummer, lpr2nd_recnummer, diagnostic2nd_col)
             
@@ -6135,9 +7208,12 @@ def process_lpr_data(lpr_file, lpr2nd_file, dta_input, sep, lpr_cols_to_read_as_
             else:
                 df1 = pd.concat([df1, df_merged], ignore_index=True, sort=False)
     else:
-        for lprfile in file_paths:
+        for file_index, lprfile in enumerate(file_paths):
             logger.info(f"[process_lpr_data] Loading {lprfile}")
-            df_lpr = load_data_file(data_file=lprfile, sep=sep, birthdatecol="", diagnostic_col="", sexcol = "", stam_cols_to_read_as_date = lpr_cols_to_read_as_date + potential_lpr_cols_to_read_as_date, iidcol=iidcol)
+            df_lpr = load_lpr_file_with_schema(
+                lprfile, file_index, lpr_schema, sep,
+                lpr_cols_to_read_as_date, potential_lpr_cols_to_read_as_date,
+            )
                         
             if df1 is None:
                 df1 = df_lpr
@@ -6490,6 +7566,7 @@ def dict_update_icd_coding(curr_codes: pd.DataFrame,
             return False
         return any(k in val for k in ['main=', 'sub=', 'rule_out=', '-']) and '-CM' not in val
     # Expect columns: 'Disorder', 'Disorder Codes' (string with commas OR list)
+    all_updated_codes = []
     for _, row in curr_codes.iterrows():
         disorder = row['Disorder']
         raw = row['Disorder Codes']
@@ -6613,7 +7690,8 @@ def dict_update_icd_coding(curr_codes: pd.DataFrame,
             )
             updated_list.extend(updated)
         curr_codes.loc[curr_codes['Disorder'] == disorder, 'Disorder Codes'] = [updated]
-    return curr_codes,updated_list
+        all_updated_codes.extend(updated_list)
+    return curr_codes, all_updated_codes
 
 def load_phenotypes(pheno_request, pheno_requestcol, pheno_name="NoName",
                     icdprefix="", noLeadingICD=True, ICDCM=False,
@@ -6665,7 +7743,9 @@ def load_phenotypes(pheno_request, pheno_requestcol, pheno_name="NoName",
         in_pheno_codes = (
             in_pheno_codes
             .dropna(how='all')
-            .applymap(lambda x: x.strip() if isinstance(x, str) else x)
+            .apply(lambda column: column.map(
+                lambda value: value.strip() if isinstance(value, str) else value
+            ))
             .replace('', pd.NA)
             .dropna(how='all')
         )
@@ -7068,18 +8148,19 @@ if __name__ == '__main__':
     parser.add_argument('--ini', required=False, default = '', help='Load an ini file that contains your data sources. Default: "%(default)s"')
     parser.add_argument('-g', required=True, help='File with all Diagnostic codes to export')
     parser.add_argument('-o', required=True, help='Outfile name; dont forget to add the location, otherwise it will be saved in the local dir.') 
-    parser.add_argument('-f', required=False, default='', help='Diagnoses file. Should have at least \"IID\", \"date_in\", \"date_out\", and \"diagnosis\" as columns. Names can be defined using --iidcol, --din, --don, and --fcol. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN protocol)') 
+    parser.add_argument('-f', required=False, default='', help='One diagnosis/event file, or multiple comma-separated files. Files may use different column names; map them in the same order with --fcol, --iidcol, --din, --don, --DiagTypecol, and --recnum. No default.')
     parser.add_argument('--f2', required=False, default='', help='Secondary diagnosis file. This is meant to be used if you have files with secondary diagnosis information as i.e. in Denmark. Here we would usually use the \'recnum\' to merge these entries with \'-f\'. These files also contain less information as the \'-f\' files. Should have at least \"recnum\", and \"diagnosis\" as columns. Names can be defined using --recnum2 and --f2col. The recnum column in the \'-f\' files can be specified using --recnum. Default: "%(default)s"') 
     parser.add_argument('--atc', required=False, default='', help='PRescription information file. Will be handeld simillar to -f but needs additional information to be specified: --atccol. Default: "%(default)s"') 
     parser.add_argument('-i', required=False, default='', help='This file should adds based on a mapping using the supplied \"IID\" column information about Gender/Sex (needed), Brithdate (needed) ... e.g., information from stamdata file. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN protocol)')
-    parser.add_argument('-j', required=False, default='', help='This file should have additional \"IID\" information e.g. date of entry to cohort. This is not needed and can also be skipped. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN protocol)') 
+    parser.add_argument('-j', required=False, default='', help='Optional IID-level metadata file, or multiple comma-separated files. Files are merged horizontally by --iidcol; the first nonmissing value wins for overlapping columns. Default: "%(default)s"')
     parser.add_argument('--ge', required=False, default='', help='General exclusion list. This referrs to a list of IIDs that should be excluded from the study. Within CHB/DBDS it will default to /data/preprocessed/genetics/chb_degen_freeze_20210503/degen_exclusion_latest') 
     parser.add_argument('--qced',required=False, default='', help='List with all IIDs that pass initial QC. Default: "%(default)s"')
     parser.add_argument('--name', required=False, default='MainPheno', help='Define your main Phenotype name. Defaults to "%(default)s"')
-    parser.add_argument('--fcol', required=False, default="c_adiag", help='Columname of -f and -i file to be mapped. Defaulting to "%(default)s"')
+    parser.add_argument('--fcol', required=False, default="c_adiag", help='Diagnosis/code column for -f. Supply one name for every file or one comma-separated name per -f file; all are normalized to the first name. Default: "%(default)s"')
     parser.add_argument('--gcol', required=False, default="c_adiag", help='Columname of -g file to be mapped against. Defaulting to "%(default)s"') 
-    parser.add_argument('--iidcol', required=False, default="pnr", help='Columname of IDs in -f and -i file. Defaulting to "%(default)s"')
+    parser.add_argument('--iidcol', required=False, default="pnr", help='IID column. For multiple -f files, supply one name for every file or one comma-separated name per file; the first name remains canonical and is also used for -i/-j. Default: "%(default)s"')
     parser.add_argument('--bdcol', required=False, default="birthdate", help='Columname of Birthdate in files. Defaults to "%(default)s"')
+    parser.add_argument('--deathdatecol', required=False, default="", help='Optional death-date column in -i or -j metadata, for example D_DODSDATO. Blank values identify people without a recorded death. In iPSYCH comparison mode, recorded deaths before the first birthday are excluded. Default: "%(default)s"')
     parser.add_argument('--sexcol', required=False, default="sex", help='Columname of Sex/Gender in files. Defaults to "%(default)s"')
     parser.add_argument('--atccol', required=False, default="", help='Columname of ATC codes in files. Defaults to "%(default)s"')
     parser.add_argument('--atcdatecol', required=False, default="", help='Columname of ATC prescription date column in the --atc file(s). Defaults to "%(default)s"')
@@ -7090,7 +8171,7 @@ if __name__ == '__main__':
     parser.add_argument('--ophsep', required=False, default=",", help='Separator of Ophold file - currently only available on CHB/DBDS,DST i.e. "\\t\"; default "%(default)s"')
     parser.add_argument('--din',required=False, default='d_inddto', help='Columname of first diagnosis date. e.g. \'d_inddto\' or \'date_in\'. Default: "%(default)s"')
     parser.add_argument('--don',required=False, default='d_uddto', help='Columname of first diagnosis date. e.g. \'d_uddto\' or \'date_out\'. Default: "%(default)s"')
-    parser.add_argument('--recnum',required=False, default='', help='Columname of the recnum field in -f files. Default: "%(default)s" (or \'recnum\' on NCRR)')
+    parser.add_argument('--recnum',required=False, default='', help='Record-number column for -f. Supply one name for every file or one comma-separated name per file. Default: "%(default)s"')
     parser.add_argument('--recnum2',required=False, default='', help='Columname of the recnum field in -f files. Default: "%(default)s" (or \'recnum\' on NCRR)')
     parser.add_argument('--f2col',required=False, default='c_adiag', help='Columname of first diagnosis date. e.g. \'d_uddto\' or \'date_out\'. Default: "%(default)s"')
     parser.add_argument('--ExDepExc', action='store_true' , help='List of diagnostic codes to exclude (e.g. Cases holding also these codes will be excluded). This is currently precoded and will be changed to allowing to specify a file with codes.') 
@@ -7101,12 +8182,12 @@ if __name__ == '__main__':
     parser.add_argument('--ICD9', action='store_true', help='Set this, if you only want to export ICD9/9-CM codes. This will only take affect together with --ExDepExc.')
     parser.add_argument('--ICD10', action='store_true', help='Set this, if you only want to export ICD10/10-CM codes. This will only take affect together with --ExDepExc.')
     parser.add_argument('--icdprefix',required=False, default='', help='If your input ICD codes are i.e. ICD10:F32 or F32 and you need them to be i.e. ICD10:DF32 or DF32, use this argument with \'D\'. Default: "%(default)s"')
-    parser.add_argument('--iidstatus', default='', help='Information about the status of the IID, i.e. if they withdrew their consent (), moved outside the country (), or died (). Default: "%(default)s"'),
-    parser.add_argument('--iidstatusdate', default='', help='Date columname for the --iidstatus information. Default: "%(default)s"'),
+    parser.add_argument('--iidstatus', default='', help='IID status column, i.e. if they withdrew their consent, moved outside the country, or died. In --iPSYCHComparison mode this may be in -i or -j and blank defaults to "stat". Default: "%(default)s"'),
+    parser.add_argument('--iidstatusdate', default='', help='Date column for --iidstatus. In --iPSYCHComparison mode this may be in -i or -j and blank defaults to "statd". Default: "%(default)s"'),
     parser.add_argument('--selectIIDs', default='', help='Input file that lists IIDs to use in the analysis. This file should have one IID per row and NO HEADER. Default: "%(default)s"'),
     parser.add_argument('--DiagTypeExclusions', default='', help='List of diagnostic types to exclude. e.g. \"H,M\". Potential c_types may be +,A,B,C,G,M,H. \nA (main diagnosis), B (secondary diagnosis), G (grundmorbus), H (referral), + (secondary diagnosis), C (complication), and M (temporary) are all possible diagnosis types.\nFrom 1995 to 1998, registering a referral diagnosis (H) was optional; thereafter, it became mandatory for certain referral methods. Grundmorbus (G) was optional from 1995 to 2001, used exclusively for psychiatric patients in 2002–2003, and then discontinued entirely. Complication (C) and temporary diagnosis (M) were both discontinued at the end of 2013. \nDefault: "%(default)s"'),
     parser.add_argument('--DiagTypeInclusions', default='', help='List of diagnostic types to include. e.g. \"A,B\". Potential c_types may be +,A,B,C,G,M,H. \nA (main diagnosis), B (secondary diagnosis), G (grundmorbus), H (referral), + (secondary diagnosis), C (complication), and M (temporary) are all possible diagnosis types.\nFrom 1995 to 1998, registering a referral diagnosis (H) was optional; thereafter, it became mandatory for certain referral methods. Grundmorbus (G) was optional from 1995 to 2001, used exclusively for psychiatric patients in 2002–2003, and then discontinued entirely. Complication (C) and temporary diagnosis (M) were both discontinued at the end of 2013. \nDefault: "%(default)s"'),
-    parser.add_argument('--DiagTypecol', default='c_types', help='Columname of diagnostic types to include/exclude; see --DiagTypeInclusions and --DiagTypeExclusions. \nDefault: "%(default)s"'),
+    parser.add_argument('--DiagTypecol', default='c_types', help='Diagnosis-type column to include/exclude for -f. Supply one name for every file or one comma-separated name per file; see --DiagTypeInclusions and --DiagTypeExclusions. Default: "%(default)s"'),
     parser.add_argument('--LifetimeExclusion', default='', help='Define Lifetime exclusions (if a case has any of the listed codes, it will be excluded). This should be a file containing either one row with all codes listed (comma separated) or per row a exclusion name, followed by a list of diagnostic codes (similar to the input). e.g. "BPD\tICD10:F30,ICD10:F30.0,ICD10:F30.1,ICD10:F30.2,ICD10:F30.8,ICD10:F30.9,ICD10:F31,ICD10:F31.0,ICD10:F31.1,ICD10:F31.2,ICD10:F31.3,ICD10:F31.4,ICD10:F31.5,ICD10:F31.6,ICD10:F31.7,ICD10:F31.8,ICD10:F31.9"\nIf you are using CHB/DBDS data, please remember, that the ICD10 codes have to start with ICD10:D***, e.g. ICD10:DF33.0. Default: "%(default)s"'),
     parser.add_argument('--PostExclusion', default='', help='Define Post exclusions (if a case has any of the listed codes, all main diagnoses after the first occuring date of the listed codes will be excluded). This should be a file containing either one row with all codes listed (comma separated) or  per row a exclusion name, followed by a list of diagnostic codes (similar to the input). Default: "%(default)s"'),
     parser.add_argument('--OneyPriorExclusion', default='', help='Define One Year Prio exclusions (all entries for a case that happen within one year prior to any date of the listed codes, these entries will be excluded). This should be a file containing either one row with all codes listed (comma separated) or  per row a exclusion name, followed by a list of diagnostic codes (similar to the input). Default: "%(default)s"'),
@@ -7115,7 +8196,19 @@ if __name__ == '__main__':
     parser.add_argument('--atcDates', default=[], help='Which columns in your --atc file are Dates? This automatically uses the columns you supplied under --bdcol, --don and --din. You only need to specify this, if you have additonal Dates that should be reformatted. Specify as comma separated list without spaces. Default: "%(default)s"'),
     parser.add_argument('--DateFormat',required=False, default="%d/%m/%Y", help='Format of Dates in your data. Default "%(default)s" --> 31/01/1980')
     parser.add_argument('--MinMaxAge', default='0,0', help='Filter by Min and Max Age at first diagnosis. This should be given as comma separated numerics in the form of x,y; i.e. 18,50 or 17.99,50.01, 0,0 (no exclusion) and is interpreted as inclusion as case if first diagnosis age >= min_age(x) and <= max_age(y). Default: "%(default)s"'),
+    parser.add_argument('--MinMaxAgeDeath', default='0,0', help='Filter by completed age at death using inclusive minimum,maximum ages. 0,0 disables the filter. Living people are excluded by an active range unless --keepAlive is used. Default: "%(default)s"')
+    parser.add_argument('--keepAlive', action='store_true', help='When --MinMaxAgeDeath is active, retain people with no recorded death in addition to deceased people in the requested age range.')
+    parser.add_argument('--onlyDead', action='store_true', help='Retain only people with a recorded death. May be combined with --MinMaxAgeDeath, but not --keepAlive.')
     parser.add_argument('--Fyob', default='', help='Filter by Year of Birth. Everyone before this date will be excluded. Date needs to be given in the following format: \"YYYY-MM-DD\". Default: "%(default)s"'),
+    parser.add_argument('--iPSYCHComparison', '--iPsychComparison', '--ipsych-comparison', dest='ipsych_comparison', action='store_true', help='Build user-supplied phenotypes from raw diagnosis data within an iPSYCH-comparable cohort. Uses -g for phenotype definitions and applies the configured birth, cohort, and diagnosis-date restrictions.')
+    parser.add_argument('--iPSYCHBirthStart', default='1981-05-01', help='Inclusive birthdate boundary for --iPSYCHComparison. Default: "%(default)s"')
+    parser.add_argument('--iPSYCHBirthEnd', default='2009-01-01', help='Exclusive birthdate boundary for --iPSYCHComparison. Default: "%(default)s"')
+    parser.add_argument('--iPSYCHDxStart', default='', help='Inclusive diagnosis-episode boundary for --iPSYCHComparison. Blank means no lower bound. Default: "%(default)s"')
+    parser.add_argument('--iPSYCHDxEnd', default='2016-01-01', help='Exclusive diagnosis-episode boundary for --iPSYCHComparison. Episodes are evaluated using --din and --don. Default: "%(default)s"')
+    parser.add_argument('--iPSYCHDKParentsCol', default='', help='Optional -i/-j column for reporting whether both parents were born in Denmark. This does not filter the cohort. If blank, DKDK/both_parents_DK is auto-detected or derived from fkode_m/fkode_f. A warning is printed when unavailable. Default: auto-detect.')
+    parser.add_argument('--iPSYCHBirthplaceCol', default='fkode', help='Birthplace-code column in -i or -j used for the Danish-birth restriction. Default: "%(default)s"')
+    parser.add_argument('--iPSYCHMotherCol', default='pnr_m', help='Maternal identifier column in -i or -j used for maternal-CPR and multiple-birth restrictions. Default: "%(default)s"')
+    parser.add_argument('--iPSYCHKeepMultiples', action='store_true', help='Keep multiple births. By default, all repeated mother/birthdate combinations are excluded in --iPSYCHComparison mode.')
     parser.add_argument('--Fgender', default='', help='Filter by gender. Only Individuals with the selected Gender (\"F\" or \"M\") will be included in the output. Default: "%(default)s"'),
     parser.add_argument('--eCc', action='store_true', help='Exclude Individuals that are identified as Controls and are only part of CHB and not DBDS. This flag only works when ran on CHB/DBDS cluster.'),
     parser.add_argument('--removePointInDiagCode', action='store_true', help='If your supplied diagnostic codes contain a point but your -f file does not')
@@ -7166,6 +8259,24 @@ if __name__ == '__main__':
             default_args.append(action.option_strings[0])
             default_argstring = default_argstring+(f"{action.option_strings[0]}: {value} (default: {default_value})\n")
 
+    ipsych_options = {
+        "enabled": args.ipsych_comparison,
+        "birth_start": args.iPSYCHBirthStart,
+        "birth_end": args.iPSYCHBirthEnd,
+        "diagnosis_start": args.iPSYCHDxStart,
+        "diagnosis_end": args.iPSYCHDxEnd,
+        "dk_parents_col": args.iPSYCHDKParentsCol,
+        "birthplace_col": args.iPSYCHBirthplaceCol,
+        "mother_col": args.iPSYCHMotherCol,
+        "status_col": args.iidstatus or IPSYCH_COMPARISON_DEFAULTS["status_col"],
+        "status_date_col": args.iidstatusdate or IPSYCH_COMPARISON_DEFAULTS["status_date_col"],
+        "deathdate_col": args.deathdatecol,
+        "death_age_range": args.MinMaxAgeDeath,
+        "keep_alive": args.keepAlive,
+        "only_dead": args.onlyDead,
+        "exclude_multiple_births": not args.iPSYCHKeepMultiples,
+    }
+
     main(args.f,args.g,args.i,args.j,args.ExDepExc,args.ge,args.fcol,args.gcol,args.iidcol,args.bdcol,
          args.sexcol,args.fsep,args.isep,args.jsep,args.gsep,args.o,args.eM,args.din,args.don,args.qced,args.DiagTypeExclusions,
          args.DiagTypeInclusions,args.DiagTypecol,args.LifetimeExclusion,args.PostExclusion,args.OneyPriorExclusion,args.eCc,
@@ -7174,7 +8285,8 @@ if __name__ == '__main__':
          args.BuildOphold,args.write_pickle, args.write_fastGWA_format, args.write_Plink2_format,args.fDates,args.iDates,
          args.MinMaxAge,args.ICDCM,args.lpp, args.RegisterRun, args.lowmem, args.verylowmem, args.batchsize, args.noLeadingICD, args.f2, 
          args.recnum, args.recnum2, args.f2col, args.atc, args.atccol, args.atcdatecol, args.atcDates, args.LPR, args.PSYK, 
-         args.ophsep, args.Ophold, args.ini, args.ICD8, args.ICD9, args.ICD10, args.BuildIndex, args.IndexDtypes, args.icdprefix, argstring, default_args, default_argstring)
+         args.ophsep, args.Ophold, args.ini, args.ICD8, args.ICD9, args.ICD10, args.BuildIndex, args.IndexDtypes, args.icdprefix, argstring, default_args, default_argstring,
+         ipsych_options, args.deathdatecol, args.MinMaxAgeDeath, args.keepAlive, args.onlyDead)
 
 # If wantig to start it locally in python and run through it step by step
 '''

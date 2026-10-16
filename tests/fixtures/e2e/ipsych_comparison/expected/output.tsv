@@ -1,0 +1,6 @@
+iid	birthdate	sex	fkode	pnr_m	DKDK	DK_born	both_parents_DK	C_STATUS	C_STATUS_DATE	diagnosis	Age_FirstDx	MDD	MDD_Codes	MDD_In_Dates	MDD_Out_Dates	MDD_earliest_date	MDD_latest_date	MDD_n_diags	MDD_n_unique_in_days	SCZ	SCZ_Codes	SCZ_In_Dates	SCZ_Out_Dates	SCZ_earliest_date	SCZ_latest_date	SCZ_n_diags	SCZ_n_unique_in_days
+1	1981-05-01	F	100	m1	True	True	True	1	1981-05-02	Case	33	Case	F32	2015-01-01	2015-01-02	2015-01-01	2015-01-02	1.0	1.0	Control							
+3	2008-12-31	M	100	m3	True	True	True	1	2009-01-01	Control	0	Control								Control							
+6	1990-01-01	F	100	m6	False	True	False	1	1990-01-02	Case	25	Case	F32	2015-01-01	2015-01-02	2015-01-01	2015-01-02	1.0	1.0	Control							
+7	1990-01-01	M	100	m7	True	True	True	1	1990-01-02	Control	0	Control								Case	F20	2015-06-01	2015-06-02	2015-06-01	2015-06-02	1.0	1.0
+8	1990-01-01	F	100	m8	True	True	True	1	1990-01-02	Control	0	Control								Case	F20	2015-12-31	2016-01-02	2015-12-31	2016-01-02	1.0	1.0

@@ -1,0 +1,47 @@
+services:
+  getpheno:
+    image: "${GETPHENO_IMAGE:-ghcr.io/mischalundberg/getpheno:latest}"
+    pull_policy: always
+    init: true
+    user: "${GETPHENO_UID:?Set GETPHENO_UID}:${GETPHENO_GID:?Set GETPHENO_GID}"
+    group_add:
+      - "${GETPHENO_ACCESS_GID:?Set GETPHENO_ACCESS_GID}"
+    environment:
+      GETPHENO_UNIX_USER: "${GETPHENO_UNIX_USER:?Set GETPHENO_UNIX_USER}"
+      GETPHENO_SHINY_CONFIG: /config/projects.conf
+      GETPHENO_HOST: 0.0.0.0
+      GETPHENO_PORT: 3838
+      HOME: /tmp/getpheno-home
+    ports:
+      - "127.0.0.1:${GETPHENO_PORT:-3838}:3838"
+    volumes:
+      - type: bind
+        source: "${GETPHENO_PROJECTS_CONFIG:?Set GETPHENO_PROJECTS_CONFIG}"
+        target: /config/projects.conf
+        read_only: true
+      - type: bind
+        source: "${GETPHENO_PREPROCESSED_ROOT:?Set GETPHENO_PREPROCESSED_ROOT}"
+        target: "${GETPHENO_PREPROCESSED_ROOT:?Set GETPHENO_PREPROCESSED_ROOT}"
+        read_only: true
+      - type: bind
+        source: "${GETPHENO_SHARED_ROOT:?Set GETPHENO_SHARED_ROOT}"
+        target: "${GETPHENO_SHARED_ROOT:?Set GETPHENO_SHARED_ROOT}"
+      - type: bind
+        source: "${GETPHENO_SERVICES_ROOT:?Set GETPHENO_SERVICES_ROOT}"
+        target: "${GETPHENO_SERVICES_ROOT:?Set GETPHENO_SERVICES_ROOT}"
+        read_only: true
+      - type: bind
+        source: "${GETPHENO_SLURM_CONF_DIR:-/etc/slurm}"
+        target: /etc/slurm
+        read_only: true
+      - type: bind
+        source: "${GETPHENO_MUNGE_DIR:-/run/munge}"
+        target: /run/munge
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

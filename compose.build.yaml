@@ -1,0 +1,9 @@
+services:
+  getpheno:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GETPHENO_REVISION: local
+    image: getpheno:local
+    pull_policy: never

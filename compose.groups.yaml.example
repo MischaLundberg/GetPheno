@@ -1,0 +1,6 @@
+# Add every supplementary project GID needed by this user's app instance.
+services:
+  getpheno:
+    group_add:
+      - "12345"
+      - "23456"

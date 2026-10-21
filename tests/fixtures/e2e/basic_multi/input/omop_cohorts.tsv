@@ -1,0 +1,3 @@
+phenotype_name	cohort_definition_id	cohort_definition_name	cohort_definition_description	definition_type_concept_id	cohort_definition_syntax	subject_concept_id	cohort_initiation_date	cohort_start_policy	cohort_end_policy
+MDD	1001	MDD cases	GetPheno MDD case cohort	0	{"fixture":"MDD"}	0	2026-01-01	earliest	latest
+PSY	1002	PSY cases	GetPheno psychosis case cohort	0	{"fixture":"PSY"}	0	2026-01-01	earliest	latest

@@ -1,0 +1,14 @@
+.git
+.gitignore
+.pytest_cache
+__pycache__
+*.py[cod]
+*.log
+.DS_Store
+.vscode
+.continue
+misc
+shiny_app/projects.conf
+.env
+.env.*
+!.env.docker.example

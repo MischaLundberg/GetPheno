@@ -5,6 +5,8 @@
 
 An optional low-dependency R Shiny interface can submit GetPheno runs to Slurm and retrieve results using a unique run code. It supports permission-aware project/protocol selection, newest-first cohort freezes, protocol-defined additional files, and clearly separated optional run settings. See [shiny_app/README.md](shiny_app/README.md).
 
+A Docker image containing GetPheno, Python, R, the Shiny app, and Slurm client tools is provided in `Dockerfile`. Pushes to `main` publish the checked-out revision as `ghcr.io/mischalundberg/getpheno:latest`; version tags also produce matching image tags. The per-user cluster deployment is documented under [Docker deployment](shiny_app/README.md#docker-deployment).
+
 ## Current capabilities
 
 - Builds one or multiple phenotypes in one run from ICD8, ICD9, ICD10, ICD9-CM, ICD10-CM, and ATC code requests.
@@ -19,6 +21,7 @@ An optional low-dependency R Shiny interface can submit GetPheno runs to Slurm a
 - Writes per-phenotype status columns as `Case` or `Control`; phenotype detail columns remain blank when not applicable.
 - Preserves STAM columns first in the output, followed by requested phenotypes, exclusions, covariates, and derived fields.
 - Writes SHA256 checksums to `<output-stem>.checksums.sha256` and records that exact filename in the generated run README.
+- Optionally writes OMOP CDM `COHORT` and `COHORT_DEFINITION` result tables with mapped `person_id` values and provenance.
 
 # Getting Started (common)
 In order to download `GetPheno`, you should clone this repository via the commands
@@ -278,6 +281,14 @@ optional arguments:
                         If you want to write the phenotype into fastGWA format.
   --write_Plink2_format
                         If you want to write the phenotype into PLINK2 format.
+  --write_omop_cohort   Write OMOP CDM COHORT and COHORT_DEFINITION result tables.
+  --omopPersonMap       Protected IID-to-person_id mapping file.
+  --omopPersonMapIidCol Source-IID column in the mapping; blank uses --iidcol.
+  --omopPersonIdCol     OMOP person-ID column; default person_id.
+  --omopCohortDefinitions
+                        OMOP cohort-definition manifest.
+  --omopOutputDir       Result directory; default <output-stem>.omop.
+  --omopsep             Input separator for both OMOP files; default tab.
   --BuildTestSet        Build the test set that can be used to see an example of the input data or to test if your setup runs smoothly
   --testRun             Run only on smaller test data input (only available for the test dataset)
   --nthreads NTHREADS   DEPRECATED! - How many threads should be used. Default: "8"
@@ -291,6 +302,30 @@ optional arguments:
   --LPR                 Experimental! - To run only based on the LPR diagnoses.
   --verbose             Verbose output
 ```
+
+### OMOP cohort result tables
+
+Use `--write_omop_cohort` with a protected IID mapping and a definition manifest:
+
+```bash
+./get_pheno.py ... --write_omop_cohort \
+  --omopPersonMap iid_to_person.tsv \
+  --omopCohortDefinitions omop_cohorts.tsv
+```
+
+The person map requires the source IID column (defaults to `--iidcol`) and `person_id`. Source IIDs are not written to the OMOP files, and the mapping is not copied. Missing mappings, duplicate IDs, invalid dates, and undefined cohort IDs stop the export.
+
+The definition manifest requires:
+
+```text
+phenotype_name  cohort_definition_id  cohort_definition_name  definition_type_concept_id  subject_concept_id
+```
+
+Optional columns are `status_column`, `case_value`, `cohort_start_policy` (`earliest`, `latest`, or `column`), `cohort_start_date_column`, `cohort_end_policy` (`start`, `latest`, or `column`), `cohort_end_date_column`, description, syntax, and initiation date. Defaults are the phenotype status column, `Case`, earliest diagnosis, and an end date equal to the start date.
+
+Controls are absent from a case cohort by default. To export a distinct control cohort, supply `control_cohort_definition_id`, `control_cohort_definition_name`, and `control_start_date_column`; optional control fields include `control_value`, `control_end_date_column`, description, syntax, and concept-ID overrides.
+
+The output directory contains `COHORT.tsv`, `COHORT_DEFINITION.tsv`, and `GETPHENO_PROVENANCE.json`. These files are also included in `<output-stem>.checksums.sha256`. The exporter validates the required fields, identifier references, dates, and duplicate periods against the [OMOP CDM 5.4 cohort-results structure](https://ohdsi.github.io/CommonDataModel/cdm54.html#cohort). Vocabulary validation and the OHDSI Data Quality Dashboard still require loading the files into the target OMOP environment.
 
 ### Minimum output in file based on standard settings:
 |Column|Explanation|
@@ -351,7 +386,7 @@ When multiple phenotypes are requested, each phenotype gets its own status and d
 
 ### Output ordering and integrity files
 
-The output columns start with the columns from the STAM/input IID file (`-i`), followed by optional additional IID information (`-j`), phenotype columns, exclusion/covariate columns, and derived output fields. Cohort membership columns such as `chb`, `dbds`, `degen`, `degen_new`, and `degen_old` are only written when they are present in the `-i` or `-j` input headers; when multiple are present, they are kept together in the input-column block.
+The output columns start with the columns from the STAM/input IID file (`-i`), followed by optional additional IID information (`-j`), phenotype columns, exclusion/covariate columns, and derived output fields. Cohort membership columns such as `chb`, `dbds`, `degen`, `degen_new`, `degen_old`, `dcb`, `drb`, and `sle` are only written when they are present in the `-i` or `-j` input headers; when multiple are present, they are kept together in the input-column block. Cohort columns are metadata and do not implicitly remove IIDs with no active cohort assignment; exclusions require an explicit filter such as `--ge` or `--exclCHBcontrols`.
 
 Each run writes a checksum file named `<output-stem>.checksums.sha256`. The generated run README contains the matching command:
 

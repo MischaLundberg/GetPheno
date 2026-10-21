@@ -565,6 +565,13 @@ def test_load_data_file_and_finalize(tmp_path):
     assert "diagnosis" in fin.columns
 
 
+def test_load_iid_list_file_preserves_first_single_column_value(tmp_path):
+    iid_file = tmp_path / "qced.txt"
+    iid_file.write_text("1\n2\n3\n", encoding="utf-8")
+
+    assert gp.load_iid_list_file(iid_file, "iid") == ["1", "2", "3"]
+
+
 def test_load_additional_information_files_merges_columns_by_iid(tmp_path):
     standard = tmp_path / "person.tsv"
     extra = tmp_path / "laboratory.tsv"

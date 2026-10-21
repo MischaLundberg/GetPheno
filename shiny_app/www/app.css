@@ -1,0 +1,243 @@
+body {
+  color: #17212b;
+  background: #f5f7f8;
+  letter-spacing: 0;
+}
+
+.navbar {
+  border-radius: 0;
+  border: 0;
+  border-bottom: 1px solid #ccd4da;
+  background: #ffffff;
+}
+
+.navbar-default .navbar-brand,
+.navbar-default .navbar-nav > li > a {
+  color: #17212b;
+}
+
+.navbar-default .navbar-nav > .active > a,
+.navbar-default .navbar-nav > .active > a:focus,
+.navbar-default .navbar-nav > .active > a:hover {
+  color: #005a70;
+  background: #e9f3f5;
+}
+
+.container-fluid {
+  max-width: 1500px;
+}
+
+.identity-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  margin: 8px 0 14px;
+  color: #44515c;
+  border-bottom: 1px solid #d9e0e4;
+}
+
+.identity-separator {
+  color: #a7b0b7;
+  margin: 0 4px;
+}
+
+.form-section {
+  padding: 2px 4px 16px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid #d9e0e4;
+}
+
+.form-section h3 {
+  margin: 8px 0 14px;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.optional-section {
+  padding-top: 8px;
+}
+
+.optional-section summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0 12px;
+  font-size: 17px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.optional-section summary::marker {
+  color: #006b7f;
+}
+
+.optional-badge {
+  padding: 2px 6px;
+  border: 1px solid #aebbc2;
+  border-radius: 4px;
+  color: #52616b;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.optional-content {
+  padding: 0 2px 8px;
+}
+
+.field-help {
+  display: inline-block;
+  margin-left: 5px;
+  color: #536f79;
+  cursor: help;
+  font-size: 12px;
+  position: relative;
+  vertical-align: 1px;
+}
+
+.field-help:hover::after,
+.field-help:focus::after {
+  position: absolute;
+  z-index: 1000;
+  bottom: calc(100% + 7px);
+  left: 0;
+  width: 320px;
+  max-width: calc(100vw - 48px);
+  padding: 8px 10px;
+  border: 1px solid #9eabb2;
+  border-radius: 4px;
+  color: #17212b;
+  background: #ffffff;
+  box-shadow: 0 3px 10px rgba(23, 33, 43, 0.16);
+  content: attr(data-tooltip);
+  font-family: Arial, sans-serif;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  pointer-events: none;
+  text-align: left;
+  white-space: normal;
+}
+
+.field-help:focus {
+  color: #005a70;
+  outline: 2px solid #78aeba;
+  outline-offset: 2px;
+}
+
+.standard-files,
+.context-warning {
+  margin: 8px 0 12px;
+  font-size: 12px;
+  color: #52616b;
+}
+
+.standard-files strong {
+  display: block;
+  color: #17212b;
+}
+
+.context-warning {
+  color: #8a4b08;
+}
+
+.form-control,
+.selectize-input,
+.btn {
+  border-radius: 4px;
+}
+
+textarea.form-control {
+  resize: vertical;
+  font-family: Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.access-ok {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  color: #28643c;
+  font-size: 12px;
+}
+
+.submit-band {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-height: 76px;
+  padding: 14px 4px;
+  border-top: 1px solid #bdc8ce;
+}
+
+.btn-primary {
+  background: #006b7f;
+  border-color: #005a6b;
+}
+
+.btn-primary:hover,
+.btn-primary:focus {
+  background: #005568;
+  border-color: #004858;
+}
+
+.run-code {
+  display: grid;
+  grid-template-columns: auto minmax(250px, auto) auto;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.run-code strong {
+  font-family: Menlo, Consolas, monospace;
+  color: #005a70;
+}
+
+.retrieve-toolbar {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) auto auto;
+  align-items: end;
+  gap: 10px;
+  margin: 22px 0;
+}
+
+.retrieve-toolbar .form-group {
+  margin: 0;
+}
+
+.run-status {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 1px;
+  margin-bottom: 18px;
+  background: #ccd4da;
+  border: 1px solid #ccd4da;
+}
+
+.run-status > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 13px;
+  background: #ffffff;
+}
+
+.empty-state {
+  padding: 22px 0;
+  color: #5f6d77;
+}
+
+@media (max-width: 760px) {
+  .retrieve-toolbar,
+  .run-status,
+  .run-code {
+    grid-template-columns: 1fr;
+  }
+
+  .submit-band {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

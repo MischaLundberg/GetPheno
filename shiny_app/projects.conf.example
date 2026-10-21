@@ -1,0 +1,64 @@
+Project: oral
+ProjectLabel: IBP Oral project
+Protocol: chb_dbds
+ProtocolLabel: CHB/DBDS
+ProjectRoot: /data/preprocessed/project_data_oral
+IniFile: /dprhdbds/shared/data/projects_chb/ibp_oral/config/get_pheno.ini
+OutputRoot: /dprhdbds/shared/data/projects_chb/ibp_oral/getpheno_runs
+AccessGroup: ibp_oral
+Python: /services/tools/conda/envs/GetPheno/bin/python
+GetPheno: /dprhdbds/shared/apps/GetPheno/get_pheno.py
+FreezePattern: /data/preprocessed/project_data_oral/chb_oral_freeze_cohort_*.tsv
+DiagnosisFile: /data/preprocessed/project_data_oral/oral_registry_lpr_lpr3_diagnoses_pat_type.tsv
+StandardAdditionalFiles: /data/preprocessed/project_data_oral/t_person.tsv|/data/preprocessed/project_data_oral/t_dodsaarsag_2.tsv
+OptionalAdditionalFiles: Epikur=/data/preprocessed/project_data_oral/epikur.tsv|Laboratory=/data/preprocessed/project_data_oral/lab_forsker.tsv|SSIK=/data/preprocessed/project_data_oral/t_ssik.tsv|SSR=/data/preprocessed/project_data_oral/t_ssr.tsv
+DeathDateColumn: D_DODSDATO
+GeneralExclusionsTemplate: /data/preprocessed/genetics/chb_oral_freeze_{freeze_base}/oral_exclusion_latest
+QcedTemplate: /data/preprocessed/genetics/chb_oral_freeze_{freeze_base}/01.Genotypes/GSA_oral_qc.fam
+Sbatch: /usr/bin/sbatch
+Partition: normal
+Account: ibp_oral
+Time: 1-00:00:00
+Memory: 32G
+Cpus: 4
+
+Project: oral
+ProjectLabel: IBP Oral project
+Protocol: ipsych
+ProtocolLabel: iPSYCH comparison
+ProjectRoot: /data/preprocessed/project_data_oral
+IniFile: /dprhdbds/shared/data/projects_chb/ibp_oral/config/get_pheno.ipsych.ini
+OutputRoot: /dprhdbds/shared/data/projects_chb/ibp_oral/getpheno_runs
+AccessGroup: ibp_oral
+Python: /services/tools/conda/envs/GetPheno/bin/python
+GetPheno: /dprhdbds/shared/apps/GetPheno/get_pheno.py
+FreezePattern: /data/preprocessed/project_data_oral/chb_oral_freeze_cohort_*.tsv
+DiagnosisFile: /data/preprocessed/project_data_oral/oral_registry_lpr_lpr3_diagnoses_pat_type.tsv
+StandardAdditionalFiles: /data/preprocessed/project_data_oral/t_person.tsv|/data/preprocessed/project_data_oral/t_dodsaarsag_2.tsv
+OptionalAdditionalFiles: Epikur=/data/preprocessed/project_data_oral/epikur.tsv|Laboratory=/data/preprocessed/project_data_oral/lab_forsker.tsv|SSIK=/data/preprocessed/project_data_oral/t_ssik.tsv|SSR=/data/preprocessed/project_data_oral/t_ssr.tsv
+DeathDateColumn: D_DODSDATO
+GeneralExclusionsTemplate: /data/preprocessed/genetics/chb_oral_freeze_{freeze_base}/oral_exclusion_latest
+QcedTemplate: /data/preprocessed/genetics/chb_oral_freeze_{freeze_base}/01.Genotypes/GSA_oral_qc.fam
+Sbatch: /usr/bin/sbatch
+Partition: normal
+Account: ibp_oral
+Time: 1-00:00:00
+Memory: 32G
+Cpus: 4
+
+Project: another_project
+ProjectLabel: Another accessible project
+Protocol: default
+ProtocolLabel: Standard protocol
+ProjectRoot: /cluster/projects/another_project
+IniFile: /cluster/projects/another_project/get_pheno.ini
+OutputRoot: /cluster/projects/another_project/getpheno_runs
+AccessGroup: another_project
+Python: /cluster/apps/GetPheno/bin/python
+GetPheno: /cluster/apps/GetPheno/get_pheno.py
+Sbatch: sbatch
+Partition: normal
+Account: another_project
+Time: 12:00:00
+Memory: 16G
+Cpus: 2

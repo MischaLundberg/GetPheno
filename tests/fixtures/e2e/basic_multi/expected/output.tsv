@@ -2,3 +2,4 @@ iid	birthdate	sex	chb	dbds	diagnosis	Age_FirstDx	MDD	MDD_Codes	MDD_In_Dates	MDD_
 1	1980-01-01	F	True	False	Case	20	Case	F32.2,F33.1	2000-01-01,2002-01-01	2000-01-02,2002-01-02	2000-01-01	2002-01-02	2.0	2.0	Control							
 2	1975-06-15	M	False	True	Control	0	Control								Case	F25.0	2001-05-10	2001-05-11	2001-05-10	2001-05-11	1.0	1.0
 3	1990-03-20	F	False	True	Control	0	Control								Control							
+4	1988-12-31	M	False	False	Control	0	Control								Control

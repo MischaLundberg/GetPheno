@@ -43,6 +43,25 @@ def test_wildcards_are_allowed_with_and_without_exact_match():
     assert set(exact_hits["iid"]) == {"a", "b", "c"}
 
 
+def test_advanced_map_cases_keeps_every_wildcard_code():
+    df = pd.DataFrame({
+        "iid": ["f30", "f31", "f32", "f39", "other"],
+        "diagnosis": ["DF300", "DF319", "DF322", "DF390", "DF200"],
+        "date_in": ["2000-01-01"] * 5,
+    })
+
+    hits = gp.advanced_map_cases(
+        values_to_match=["DF30*", "DF31*", "DF32*", "DF39*"],
+        df1=df,
+        exact_match=True,
+        diagnostic_col="diagnosis",
+        input_date_in_name="date_in",
+        iidcol="iid",
+    )
+
+    assert set(hits["iid"]) == {"f30", "f31", "f32", "f39"}
+
+
 def test_expanded_ranges_follow_exact_match_mode():
     df = pd.DataFrame({
         "iid": ["a", "b", "c", "d", "e", "f"],
@@ -697,6 +716,37 @@ def test_multiple_lpr_files_map_per_file_columns_and_fill_missing(tmp_path, caps
     assert warning.count("--DiagTypecol") == 1
 
 
+def test_lpr_loader_preserves_large_iids_before_normalization(tmp_path):
+    diagnoses = tmp_path / "diagnoses.tsv"
+    diagnoses.write_text(
+        "cpr_enc\tdiagnosis\n"
+        "9007199254740993\tF32\n"
+        "9007199254740995\tF33\n"
+        "\tF34\n",
+        encoding="utf-8",
+    )
+    schema = gp.build_lpr_input_schema(str(diagnoses), "diagnosis", "cpr_enc")
+
+    result = gp.load_lpr_file_with_schema(
+        str(diagnoses), 0, schema, "\t", [], []
+    )
+
+    assert result["cpr_enc"].dropna().tolist() == [
+        "9007199254740993",
+        "9007199254740995",
+    ]
+
+
+def test_iid_list_loader_preserves_leading_zeros(tmp_path):
+    iid_file = tmp_path / "iids.txt"
+    iid_file.write_text("00123\n04567\n", encoding="utf-8")
+
+    assert gp.load_iid_list_file(iid_file, "iid", None, "selectIIDs") == [
+        "00123",
+        "04567",
+    ]
+
+
 def test_explicit_blank_per_file_column_adds_na_without_warning(tmp_path, capsys):
     first = tmp_path / "diagnoses.tsv"
     second = tmp_path / "procedures.tsv"
@@ -898,6 +948,28 @@ def test_select_by_iid_and_diag_prefix(tmp_path):
     # Should find all F32* codes
     assert len(result) == 4
     assert all(d.startswith('ICD10:F32') for d in result['diagnosis'])
+
+
+def test_select_by_iid_and_diag_prefixed_request_matches_unprefixed_rows(tmp_path):
+    """An explicit ICD system may match unlabeled rows, but not another system."""
+    h5path = tmp_path / "mixed_icd.h5"
+    frame = pd.DataFrame({
+        "iid": ["1", "2", "3", "4"],
+        "diagnosis": ["ICD10:DF30", "DF31.1", "ICD8:DF32", "DG40"],
+    })
+    frame.to_hdf(h5path, key="df", format="table", data_columns=True)
+
+    result = gp.select_by_iid_and_diag_optimized(
+        h5_path=h5path,
+        table_name="df",
+        iidcol="iid",
+        iids=None,
+        diagcol="diagnosis",
+        diags=["ICD10:DF30", "ICD10:DF31", "ICD10:DF32"],
+        prefix_all=True,
+    )
+
+    assert result["iid"].tolist() == ["1", "2"]
 
 def test_select_by_iid_and_diag_combined(tmp_path):
     """Test combined IID and diagnosis filtering"""

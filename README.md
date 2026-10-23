@@ -5,7 +5,7 @@
 
 An optional low-dependency R Shiny interface can submit GetPheno runs to Slurm and retrieve results using a unique run code. It supports permission-aware project/protocol selection, newest-first cohort freezes, protocol-defined additional files, and clearly separated optional run settings. See [shiny_app/README.md](shiny_app/README.md).
 
-A Docker image containing GetPheno, Python, R, the Shiny app, and Slurm client tools is provided in `Dockerfile`. Pushes to `main` publish the checked-out revision as `ghcr.io/mischalundberg/getpheno:latest`; version tags also produce matching image tags. The per-user cluster deployment is documented under [Docker deployment](shiny_app/README.md#docker-deployment).
+A Docker image containing GetPheno, Python, R, the Shiny app, and Slurm client tools is provided in `Dockerfile`. Pushes to `main` publish `ghcr.io/mischalundberg/getpheno:edge`; release tags such as `V1.30` publish both the matching version tag and `latest`. Production deployments should pin a release tag. The per-user cluster deployment is documented under [Docker deployment](shiny_app/README.md#docker-deployment).
 
 ## Current capabilities
 

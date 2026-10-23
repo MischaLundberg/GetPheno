@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+mode="${1:-shiny}"
+if [[ "$mode" == "getpheno" || "$mode" == "get_pheno.py" ]]; then
+    shift
+    exec python3 /opt/getpheno/get_pheno.py "$@"
+fi
+if [[ "$mode" == -* ]]; then
+    exec python3 /opt/getpheno/get_pheno.py "$@"
+fi
+if [[ "$mode" != "shiny" ]]; then
+    exec "$@"
+fi
+shift || true
+
 config="${GETPHENO_SHINY_CONFIG:-/config/projects.conf}"
 host="${GETPHENO_HOST:-0.0.0.0}"
 port="${GETPHENO_PORT:-3838}"
@@ -25,4 +38,5 @@ chmod 0700 "$HOME"
 exec Rscript /opt/getpheno/shiny_app/run_app.R \
     "--config=$config" \
     "--host=$host" \
-    "--port=$port"
+    "--port=$port" \
+    "$@"

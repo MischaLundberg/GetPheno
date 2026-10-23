@@ -103,7 +103,15 @@ Then open `http://127.0.0.1:3838`. Run the application only on a node where clus
 
 ## Docker deployment
 
-The repository-level `Dockerfile` contains the `get_pheno.py` revision present in the Docker build context, Python 3, the Python runtime dependencies, R, Shiny, and Slurm client commands. It does not download source code when the container starts. The GitHub workflow publishes every `main` revision as `ghcr.io/mischalundberg/getpheno:latest`, plus immutable commit-SHA and version-tag images. It uses the fixed `rocker/r-ver:4.3.3` base. `compose.yaml` pulls the configured image, starts one non-root container for one authenticated Unix user, and publishes Shiny only on `127.0.0.1`.
+The repository-level `Dockerfile` contains the `get_pheno.py` revision present in the Docker build context, Python 3, the Python runtime dependencies, R, Shiny, and Slurm client commands. It does not download source code when the container starts. The GitHub workflow publishes every `main` revision as `ghcr.io/mischalundberg/getpheno:edge`. Pushing a release tag such as `V1.30` publishes `:V1.30` and advances `:latest`; every build also receives a commit-SHA tag. It uses the fixed `rocker/r-ver:4.3.3` base. `compose.yaml` pulls the configured image, starts one non-root container for one authenticated Unix user, and publishes Shiny only on `127.0.0.1`.
+
+For production, set an explicit release in `.env.docker` rather than relying on the moving `latest` tag:
+
+```text
+GETPHENO_IMAGE=ghcr.io/mischalundberg/getpheno:V1.30
+```
+
+No Dockerfile edit is needed for the next release: create and push the next Git tag after the release commit is finalized. The workflow builds directly from that checked-out tag and records its full commit SHA in the image metadata.
 
 Docker does not replace the app's Unix authorization model. Start one container per Unix user with that user's numeric UID, primary GID, login name, and project GIDs. The kernel then applies the mounted filesystem's normal ownership, group, and ACL checks.
 

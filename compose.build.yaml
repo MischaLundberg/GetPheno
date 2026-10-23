@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
+        GETPHENO_VERSION: local
         GETPHENO_REVISION: local
     image: getpheno:local
     pull_policy: never

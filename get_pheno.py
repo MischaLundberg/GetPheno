@@ -2354,7 +2354,7 @@ def cohort_membership_mask(df, columns):
             mask |= values.isin(["TRUE", "T", "1", "YES", "Y"])
     return mask
 
-COHORT_MEMBERSHIP_COLUMNS = ["chb", "dbds", "degen", "degen_new", "degen_old", "dcb", "drb", "sle"]
+COHORT_MEMBERSHIP_COLUMNS = ["chb", "dbds", "degen", "degen_new", "degen_old", "dcb", "drb", "sle", "sle_geist"]
 CHB_EQUIVALENT_COLUMNS = ["chb", "degen", "degen_new", "degen_old"]
 
 def group_cohort_columns(columns):
@@ -3346,10 +3346,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             ATC_Requested = "None"
 
         if selectIIDs != "" and os.path.exists(selectIIDs):
-            # read iid file
-            iids = pd.read_csv(selectIIDs, header=None)[0]
-            # normalize
-            iids = normalize_iid_series(iids, target="str").tolist()
+            iids = load_iid_list_file(selectIIDs, iidcol, None, "selectIIDs")
             # filter df3
             df3 = df3[df3[iidcol].astype("string").isin(iids)]
 
@@ -4152,15 +4149,20 @@ def select_by_iid_and_diag_optimized(
     if diags_list == []:
         diags_list = None
 
-    # Build diag exact/prefix sets (allow diags_list == None -> no diag filtering)
-    exact_set, prefixes = set(), []
+    # Group requested codes by explicit ICD system. A prefixed request such as
+    # ICD10:DF30 must also find legacy/indexed DF30 rows, but must not match a
+    # row explicitly labelled as another ICD system.
+    exact_by_system, prefixes_by_system = {}, {}
     if diags_list is not None:
         for d in map(str, diags_list):
             d = d.strip()
-            if prefix_all or d.endswith("*"):
-                prefixes.append(d[:-1] if d.endswith("*") else d)
-            else:
-                exact_set.add(d)
+            is_prefix = prefix_all or d.endswith("*")
+            if d.endswith("*"):
+                d = d[:-1]
+            match = re.match(r"^(ICD\d{1,2})[-:]?(.*)$", d)
+            system, code = (match.group(1), match.group(2)) if match else (None, d)
+            target = prefixes_by_system if is_prefix else exact_by_system
+            target.setdefault(system, set()).add(code)
 
     # Ensure required columns are always requested from the store
     need = {iidcol, diagcol}
@@ -4218,12 +4220,19 @@ def select_by_iid_and_diag_optimized(
                 diag_mask = pd.Series(True, index=chunk.index)
             else:
                 s = chunk[diagcol].astype("string").str.strip()
+                s_system = s.str.extract(r"^(ICD\d{1,2})[-:]?", expand=False)
                 s_noprefix = s.str.replace(r"^(ICD\d{1,2}[-:]?)", "", regex=True)
                 dmask = pd.Series(False, index=chunk.index)
-                if exact_set:
-                    dmask |= s.isin(exact_set) | s_noprefix.isin(exact_set)
-                if prefixes:
-                    dmask |= s.str.startswith(tuple(prefixes), na=False) | s_noprefix.str.startswith(tuple(prefixes), na=False)
+                for system, codes in exact_by_system.items():
+                    system_mask = pd.Series(True, index=chunk.index) if system is None else (
+                        s_system.isna() | s_system.eq(system)
+                    )
+                    dmask |= system_mask & s_noprefix.isin(codes)
+                for system, prefixes in prefixes_by_system.items():
+                    system_mask = pd.Series(True, index=chunk.index) if system is None else (
+                        s_system.isna() | s_system.eq(system)
+                    )
+                    dmask |= system_mask & s_noprefix.str.startswith(tuple(prefixes), na=False)
                 diag_mask = dmask
                 # s = chunk[diagcol].astype("string").str.strip()
                 # dmask = pd.Series(False, index=chunk.index)
@@ -5065,6 +5074,13 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     batch_iids = df3[iidcol].dropna().drop_duplicates().astype(str).tolist()
     batch_iid_set = set(batch_iids)
     batch_n_iids = len(batch_iids)
+    logger.info(
+        "[process_pheno_and_exclusions] Before IID-universe filtering: df1=%s rows/%s unique IIDs; df3=%s rows/%s unique IIDs.",
+        len(df1) if df1 is not None else 0,
+        df1[iidcol].nunique() if df1 is not None and iidcol in df1.columns else 0,
+        len(df3),
+        batch_n_iids,
+    )
     if n_stam_iids != batch_n_iids:
         logger.info(f"[process_pheno_and_exclusions] Correcting n_stam_iids from {n_stam_iids} to current batch size {batch_n_iids}.")
         n_stam_iids = batch_n_iids
@@ -6854,48 +6870,60 @@ def detect_advanced_cases(df, rule_dict, input_date_in_name, exact_match, diagco
 def advanced_map_cases(values_to_match, df1, exact_match, diagnostic_col, input_date_in_name, 
                       iidcol, skip_icd_update=False, remove_point_in_diag_request=False, 
                       ICDCM=False, noLeadingICD=False, icdprefix=False):
-    """Handle both advanced rules and wildcard patterns."""
-    
-    # Check if this is an advanced rule or wildcard pattern
-    is_advanced = False
+    """Route advanced rule expressions and ordinary code lists to their matchers."""
+
     if isinstance(values_to_match, str):
-        is_advanced = ('main=' in values_to_match or 'sub=' in values_to_match or 
-                      'rule_out=' in values_to_match or values_to_match.endswith('*'))
-    elif isinstance(values_to_match, list) and len(values_to_match) > 0:
-        first_val = str(values_to_match[0])
-        is_advanced = ('main=' in first_val or 'sub=' in first_val or 
-                      'rule_out=' in first_val or first_val.endswith('*'))
-    
-    if is_advanced:
-        # Parse the rule
-        if isinstance(values_to_match, list):
-            values_to_match = values_to_match[0] if len(values_to_match) > 0 else ""
-        
-        rule_dict = parse_pheno_rules(values_to_match, exact_match=exact_match,
-                                     skip_icd_update=skip_icd_update,
-                                     remove_point_in_diag_request=remove_point_in_diag_request,
-                                     ICDCM=ICDCM, noLeadingICD=noLeadingICD, 
-                                     icdprefix=icdprefix)
-        
-        # If we have a simple range/wildcard (no advanced main/sub/rule_out), use standard map_cases
-        if rule_dict.get('ranges'):
-            tmp_result_df = map_cases(values_to_match=rule_dict['ranges'], 
-                                    exact_match=exact_match, df1=df1, 
-                                    diagcol=diagnostic_col)
-        else:
-            # Full advanced rule processing
-            tmp_result_df = detect_advanced_cases(df=df1, rule_dict=rule_dict, 
-                                               input_date_in_name=input_date_in_name, 
-                                               exact_match=exact_match, diagcol=diagnostic_col, 
-                                               iidcol=iidcol)
-        tmp_result_df['diagnosis'] = '[Advanced Rule]'
+        match_values = [values_to_match]
+    elif values_to_match is None:
+        match_values = []
     else:
-        # Standard matching
-        tmp_result_df = map_cases(values_to_match=values_to_match, 
-                                exact_match=exact_match, df1=df1, 
-                                diagcol=diagnostic_col)
-    
-    return tmp_result_df
+        match_values = list(values_to_match)
+
+    # A wildcard is an ordinary code matcher. Treat only explicit rule syntax as
+    # advanced; otherwise a list such as F30*,F31*,... would lose every code
+    # after the first one when converted to a single rule string.
+    advanced_values = [
+        str(value) for value in match_values
+        if any(token in str(value) for token in ('main=', 'sub=', 'rule_out='))
+    ]
+    ordinary_values = [value for value in match_values if str(value) not in advanced_values]
+    matched_frames = []
+
+    if ordinary_values:
+        matched_frames.append(map_cases(
+            values_to_match=ordinary_values,
+            exact_match=exact_match,
+            df1=df1,
+            diagcol=diagnostic_col,
+        ))
+
+    for rule_value in advanced_values:
+        rule_dict = parse_pheno_rules(
+            rule_value,
+            exact_match=exact_match,
+            skip_icd_update=skip_icd_update,
+            remove_point_in_diag_request=remove_point_in_diag_request,
+            ICDCM=ICDCM,
+            noLeadingICD=noLeadingICD,
+            icdprefix=icdprefix,
+        )
+        rule_matches = detect_advanced_cases(
+            df=df1,
+            rule_dict=rule_dict,
+            input_date_in_name=input_date_in_name,
+            exact_match=exact_match,
+            diagcol=diagnostic_col,
+            iidcol=iidcol,
+        )
+        if not rule_matches.empty:
+            rule_matches = rule_matches.copy()
+            rule_matches['diagnosis'] = '[Advanced Rule]'
+            matched_frames.append(rule_matches)
+
+    nonempty_frames = [frame for frame in matched_frames if not frame.empty]
+    if not nonempty_frames:
+        return pd.DataFrame(columns=df1.columns)
+    return pd.concat(nonempty_frames, ignore_index=True, sort=False).drop_duplicates()
 
 def advanced_map_cases_old(values_to_match, df1, exact_match, diagnostic_col, input_date_in_name, iidcol, skip_icd_update = False, remove_point_in_diag_request = False, ICDCM = False, noLeadingICD = False, icdprefix = False):
     # Handle advanced logic if detected
@@ -7697,6 +7725,8 @@ def load_lpr_file_with_schema(
             requested_dates.append(mapping["sources"][file_index])
 
     source_path = schema.get("source_paths", schema["paths"])[file_index]
+    iid_mapping = schema["columns"].get("iidcol")
+    source_iid = iid_mapping["sources"][file_index] if iid_mapping else None
     frame = load_data_file(
         data_file=path,
         sep=sep,
@@ -7704,7 +7734,7 @@ def load_lpr_file_with_schema(
         diagnostic_col="",
         sexcol="",
         stam_cols_to_read_as_date=requested_dates,
-        iidcol=None,
+        iidcol=source_iid,
     )
     rename = {}
     for option, mapping in schema["columns"].items():
@@ -7731,6 +7761,13 @@ def load_lpr_file_with_schema(
     canonical_iid = _lpr_schema_value(schema, "iidcol")
     if canonical_iid and canonical_iid in frame.columns:
         frame[canonical_iid] = normalize_iid_series(frame[canonical_iid], target="str")
+        logger.info(
+            "[load_lpr_file_with_schema] Loaded %s rows and %s unique IIDs from %s; IID dtype=%s.",
+            len(frame),
+            frame[canonical_iid].nunique(),
+            source_path,
+            frame[canonical_iid].dtype,
+        )
     return frame
 
 
@@ -7787,6 +7824,12 @@ def process_lpr_data(lpr_file, lpr2nd_file, dta_input, sep, lpr_cols_to_read_as_
                 df1 = df_lpr
             else:
                 df1 = pd.concat([df1, df_lpr], ignore_index=True, sort=False)
+    logger.info(
+        "[process_lpr_data] Combined %s row(s) and %s unique IIDs from %s -f file(s).",
+        len(df1) if df1 is not None else 0,
+        df1[iidcol].nunique() if df1 is not None and iidcol in df1.columns else 0,
+        len(file_paths),
+    )
     return df1
 
 def finalize_lpr_data(df1, diagnostic_col, birthdatecol, ctype_col, verbose):

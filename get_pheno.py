@@ -90,7 +90,7 @@ min_Age = -1
 max_Age = -1
 DK_clusters = ("NCRR_DST", "IBP_DST", "IBP_computerome", "iPSYCH", "CHB_DBDS", "DBDS_DST")
 KNOWN_ICD_PREFIXES = ("ICD10-CM:", "ICD9-CM:", "ICD10:", "ICD9:", "ICD8:")
-__version__ = "V1.30_Alpha-21.10.2026"
+__version__ = "V1.31_Alpha-27.10.2026"
 disclaimer_text = (
     f"GetPheno version: {__version__}\n"
     "Disclaimer:\n"

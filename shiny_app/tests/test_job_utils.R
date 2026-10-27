@@ -56,6 +56,7 @@ writeLines(c(
   "DateInColumns: date_in",
   "DateOutColumns: date_out",
   "DiagnosisTypeColumns: diagnosis_type,",
+  "RegisterColumns: origin,registry",
   "DeathDateColumn: D_DODSDATO",
   paste("StandardAdditionalFiles:", standard_info),
   paste0("OptionalAdditionalFiles: Laboratory=", optional_info),
@@ -85,6 +86,7 @@ protocol_files <- resolve_protocol_files(
 stopifnot(protocol_files$stam == freeze_new)
 stopifnot(identical(protocol_files$diagnosis, c(diagnosis, procedures)))
 stopifnot(protocol_files$diagnostic_columns == "diagnosis,code")
+stopifnot(protocol_files$register_columns == "origin,registry")
 stopifnot(protocol_files$death_date_column == "D_DODSDATO")
 stopifnot(identical(protocol_files$additional, c(standard_info, optional_info)))
 stopifnot(protocol_files$general_exclusions == general_exclusions)
@@ -125,6 +127,7 @@ command <- build_getpheno_command(
   iid_subset = iid_subset
 )
 stopifnot("--iPSYCHComparison" %in% command$args)
+stopifnot(command$args[match("--registercol", command$args) + 1L] == "origin,registry")
 stopifnot("--write_fastGWA_format" %in% command$args)
 stopifnot("--write_Plink2_format" %in% command$args)
 stopifnot("--ICD8" %in% command$args)
@@ -164,3 +167,11 @@ found <- find_run_directory(registry, "tester", run_id)
 stopifnot(identical(found, normalizePath(run_dir)))
 
 cat("All GetPheno Shiny utility tests passed.\n")
+
+preset_command <- build_getpheno_command(
+  registry[1, , drop = FALSE], run_id, "", output_file,
+  options = list(ipsych = TRUE, gender = "", fyob = "", min_max_age = "0,0"),
+  protocol_files = protocol_files
+)
+stopifnot("--iPSYCHComparison" %in% preset_command$args)
+stopifnot(!"-g" %in% preset_command$args)

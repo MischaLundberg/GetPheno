@@ -16,7 +16,7 @@ A Docker image containing GetPheno, Python, R, the Shiny app, and Slurm client t
 - Supports lifetime, one-year-prior, and post-onset exclusion files, including ATC-based exclusions.
 - Supports IID subsets and optional death-date, age-at-death, living-person, and deceased-only filters.
 - Supports `--lowmem` and `--verylowmem` batching with fixed output columns across batches, so appended TSV output keeps a stable schema.
-- Supports `--iPSYCHComparison` for building user-defined phenotypes directly from raw diagnosis records within configurable iPSYCH-comparable cohort and date restrictions.
+- Supports `--iPSYCHComparison` with user-defined phenotypes or eight built-in presets and phenotype-specific eligibility rules.
 - Restricts each batch to the current STAM/IID universe and applies QC (`--qced`) and general exclusions before case/control output is finalized.
 - Writes per-phenotype status columns as `Case` or `Control`; phenotype detail columns remain blank when not applicable.
 - Preserves STAM columns first in the output, followed by requested phenotypes, exclusions, covariates, and derived fields.
@@ -127,7 +127,7 @@ These files are merged horizontally by IID rather than appended as rows. All IID
 
 ### iPSYCH-comparison cohort mode
 
-`--iPSYCHComparison` creates phenotypes directly from the raw diagnosis file (`-f`). Phenotypes are not hardcoded: supply them through the normal `-g` phenotype-request file. For example:
+`--iPSYCHComparison` creates phenotypes directly from the raw diagnosis file (`-f`). Supply a `-g` phenotype-request file to use your own definitions, or omit `-g` to use all eight built-in presets. For example:
 
 ```text
 skiz	ICD10:F20
@@ -165,22 +165,35 @@ The default cohort rules mirror the supplied iPSYCH-comparison script:
 - The individual must be alive or resident in Denmark at age one: `statd >= birthdate + 365 days`, or `stat` is `1` or `3`. When `--deathdatecol` is supplied, a recorded death before the first birthday excludes the IID even if a status field would otherwise retain it.
 - Repeated mother/birthdate combinations are treated as multiple births and all are excluded. Use `--iPSYCHKeepMultiples` to retain them.
 - Parental birthplace is reported but is not an inclusion criterion, matching the supplied R code. The mode auto-detects `DKDK` or `both_parents_DK`, or derives the indicator from `fkode_m` and `fkode_f`.
-- Diagnosis episodes must overlap the configured date window. By default there is no lower diagnosis boundary and the exclusive upper boundary is `2016-01-01`. Both `--din` and `--don` are parsed and used; an episode beginning before the upper boundary and ending after it is retained.
+- With a supplied phenotype file, diagnosis episodes must overlap the configured date window. By default there is no lower diagnosis boundary and the exclusive upper boundary is `2016-01-01`. Both `--din` and `--don` are parsed and used; an episode beginning before the upper boundary and ending after it is retained.
+
+Without `-g`, the supplied `iPSYCH_*_Codes` definitions produce these columns:
+
+| Preset | Register contains (case insensitive) | Minimum age at diagnosis | Last diagnosis date (inclusive) |
+| --- | --- | --- | --- |
+| AFFEK, BIPOL, SKIZOSPEK, SKIZO | PSYK | 10 years | 2015-12-31 |
+| ADHD, ASD | PSYK | 1 year | 2015-12-31 |
+| ANO | PSYK or LPR | 1 year | 2016-12-31 |
+| PPD | PSYK | No additional age threshold | 2015-12-31 |
+
+PPD additionally requires a supplied live-birth code on the mother's own IID, dated from the diagnosis date back through one calendar year. Birth day and first anniversary are included. All available birth events are considered, including LPR events when `--PSYK` selects psychiatric diagnoses. Presets match diagnosis-code prefixes, including subcodes, regardless of `--eM`. `--iPSYCHDxStart` optionally adds a lower diagnosis-date boundary; preset-specific upper dates take precedence over `--iPSYCHDxEnd`. Custom `-g` definitions retain their existing matching and date-window behavior.
+
+`--registercol origin` selects the register/source column; `registercol = origin` configures it in the INI file. A comma-separated mapping supports different names across `-f` files. When filtering is needed and no name is supplied, each file is checked for `register`, then `source`. Missing required columns cause an error. `--PSYK` and `--LPR` filter rows by substring in this column across every file; file order no longer selects the source. `IndexDtypes` controls storage types only; configured register columns are stored as strings when indexing.
 
 The cohort metadata used by these rules may be supplied in either the STAM file (`-i`) or the additional-information file (`-j`). GetPheno combines both tables by IID before applying the restrictions, then limits both tables to the retained IID universe. Birthdate remains required in `-i`. A death-date column is optional: datasets containing only `stat` continue to use the status-only rule.
 
 `--deathdatecol D_DODSDATO` identifies the optional death date; blank values mean no recorded death. `--MinMaxAgeDeath 20,80` keeps deceased people whose completed age at death is within the inclusive range. Add `--keepAlive` to retain people with blank death dates alongside that range, or use `--onlyDead` to retain only recorded deaths. `--onlyDead` can be combined with the age range; `--keepAlive` and `--onlyDead` are mutually exclusive. `--selectIIDs` accepts a headerless file containing one IID per line.
 
-If no DKDK/both-Danish-born-parents indicator and no `fkode_m`/`fkode_f` columns are available, GetPheno prints and logs a warning because the parental-birthplace indicator cannot be reported; no IID is excluded for this reason. Missing child birthplace, maternal identifier, or age-one status fields also produce explicit warnings when their corresponding criterion cannot be applied. Both diagnosis date columns are required in this mode.
+If no DKDK/both-Danish-born-parents indicator and no `fkode_m`/`fkode_f` columns are available, GetPheno prints and logs a warning because the parental-birthplace indicator cannot be reported; no IID is excluded for this reason. Missing child birthplace, maternal identifier, or age-one status fields also produce explicit warnings when their corresponding criterion cannot be applied. Supplied phenotype files require both diagnosis date columns for episode overlap; presets use `--din` as the diagnosis date.
 
-The defaults can be changed with `--iPSYCHBirthStart`, `--iPSYCHBirthEnd`, `--iPSYCHDxStart`, `--iPSYCHDxEnd`, `--iPSYCHDKParentsCol`, `--iPSYCHBirthplaceCol`, and `--iPSYCHMotherCol`. Use the existing `--iidstatus` and `--iidstatusdate` options when the age-one fields are not named `stat` and `statd`; these names may refer to columns in `-i` or `-j`. The same restricted IID universe and diagnosis window are used in standard, `--lowmem`, and `--verylowmem` execution.
+Cohort and custom-definition date defaults can be changed with `--iPSYCHBirthStart`, `--iPSYCHBirthEnd`, `--iPSYCHDxStart`, `--iPSYCHDxEnd`, `--iPSYCHDKParentsCol`, `--iPSYCHBirthplaceCol`, and `--iPSYCHMotherCol`. Use the existing `--iidstatus` and `--iidstatusdate` options when the age-one fields are not named `stat` and `statd`; these names may refer to columns in `-i` or `-j`. The same restricted IID universe and diagnosis window are used in standard, `--lowmem`, and `--verylowmem` execution.
 
 ### Options (Flags):
 ```
-usage: get_pheno.py [-h] [--ini INI] -g G -o O [-f F] [--f2 F2] [--atc ATC] [-i I] [-j J] [--ge GE] [--qced QCED] [--name NAME] [--fcol FCOL] [--gcol GCOL] [--iidcol IIDCOL] [--bdcol BDCOL] [--sexcol SEXCOL] [--atccol ATCCOL] [--atcdatecol ATCDATECOL] [--fsep FSEP] [--gsep GSEP] [--ophsep OPHSEP] [--din DIN] [--don DON] [--recnum RECNUM] [--recnum2 RECNUM2] [--f2col F2COL] [--ExDepExc] [--eM]
+usage: get_pheno.py [-h] [--ini INI] [-g G] -o O [-f F] [--f2 F2] [--atc ATC] [-i I] [-j J] [--ge GE] [--qced QCED] [--name NAME] [--fcol FCOL] [--gcol GCOL] [--iidcol IIDCOL] [--bdcol BDCOL] [--sexcol SEXCOL] [--atccol ATCCOL] [--atcdatecol ATCDATECOL] [--fsep FSEP] [--gsep GSEP] [--ophsep OPHSEP] [--din DIN] [--don DON] [--recnum RECNUM] [--recnum2 RECNUM2] [--f2col F2COL] [--ExDepExc] [--eM]
                                 [--noLeadingICD] [--ICDCM] [--ICD8] [--ICD9] [--ICD10] [--iidstatus IIDSTATUS] [--iidstatusdate IIDSTATUSDATE] [--DiagTypeExclusions DIAGTYPEEXCLUSIONS] [--DiagTypeInclusions DIAGTYPEINCLUSIONS] [--LifetimeExclusion LIFETIMEEXCLUSION] [--PostExclusion POSTEXCLUSION] [--OneyPriorExclusion ONEYPRIOREXCLUSION] [--fDates FDATES] [--iDates IDATES] [--atcDates ATCDATES] [--DateFormat DATEFORMAT] [--MinMaxAge MINMAXAGE] [--Fyob FYOB]
                                 [--iPSYCHComparison] [--iPSYCHBirthStart IPSYCHBIRTHSTART] [--iPSYCHBirthEnd IPSYCHBIRTHEND] [--iPSYCHDxStart IPSYCHDXSTART] [--iPSYCHDxEnd IPSYCHDXEND] [--iPSYCHDKParentsCol IPSYCHDKPARENTSCOL] [--iPSYCHBirthplaceCol IPSYCHBIRTHPLACECOL] [--iPSYCHMotherCol IPSYCHMOTHERCOL] [--iPSYCHKeepMultiples]
-                                [--Fgender FGENDER] [--eCc] [--removePointInDiagCode] [--skipICDUpdate] [--MatchFI] [--BuildEntryExitDates] [--Ophold OPHOLD] [--BuildOphold] [--RegisterRun] [--lpp] [--write_pickle] [--write_fastGWA_format] [--write_Plink2_format] [--BuildTestSet] [--testRun] [--nthreads NTHREADS] [--lowmem] [--verylowmem] [--batchsize BATCHSIZE] [--PSYK] [--LPR] [--BuildIndex] [--IndexDtypes INDEXDTYPES] [--verbose]
+                                [--Fgender FGENDER] [--eCc] [--removePointInDiagCode] [--skipICDUpdate] [--MatchFI] [--BuildEntryExitDates] [--Ophold OPHOLD] [--BuildOphold] [--RegisterRun] [--lpp] [--write_pickle] [--write_fastGWA_format] [--write_Plink2_format] [--BuildTestSet] [--testRun] [--nthreads NTHREADS] [--lowmem] [--verylowmem] [--batchsize BATCHSIZE] [--registercol REGISTERCOL] [--PSYK] [--LPR] [--BuildIndex] [--IndexDtypes INDEXDTYPES] [--verbose]
 
 Extracts a Phenotype from input files based on IIDs and diagnostic codes. The best way to start, is to generate a test dataset: 'python get_phenotype.py -g "" -o ./ --BuildTestSet' and then run 'python get_phenotype.py -g "" -o testrun.tsv --eM --ExDepExc --testRun'
 
@@ -255,7 +268,7 @@ optional arguments:
   --iPSYCHDxStart IPSYCHDXSTART
                         Inclusive diagnosis-episode boundary; blank means no lower bound.
   --iPSYCHDxEnd IPSYCHDXEND
-                        Exclusive diagnosis-episode boundary applied using --din and --don. Default: "2016-01-01"
+                        Exclusive diagnosis-episode boundary for supplied definitions; presets use their own upper dates. Default: "2016-01-01"
   --iPSYCHDKParentsCol IPSYCHDKPARENTSCOL
                         Optional DKDK reporting column; otherwise auto-detected or derived from fkode_m/fkode_f. This does not filter IIDs.
   --iPSYCHBirthplaceCol IPSYCHBIRTHPLACECOL
@@ -298,8 +311,9 @@ optional arguments:
   --verylowmem          Experimental! - Applies low-memory batching to HDF5-indexed input.
   --BuildIndex          Build an indexed HDF5 file for faster repeated low-memory runs.
   --IndexDtypes         JSON dtype mapping used while building HDF5 indexes.
-  --PSYK                Experimental! - To run only based on the PSYK diagnoses.
-  --LPR                 Experimental! - To run only based on the LPR diagnoses.
+  --registercol         Register/source column; shared name or one name per -f file (also INI: registercol).
+  --PSYK                Keep rows whose register/source contains PSYK (case insensitive).
+  --LPR                 Keep rows whose register/source contains LPR (case insensitive).
   --verbose             Verbose output
 ```
 

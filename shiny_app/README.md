@@ -65,7 +65,7 @@ DateOutColumns: date_out
 DiagnosisTypeColumns: diagnosis_type,
 ```
 
-The launcher converts the path separator to the comma-separated `-f` argument and passes the mappings as `--fcol`, `--iidcol`, `--din`, `--don`, `--DiagTypecol`, and `--recnum` (`RecordNumberColumns`). `DiagnosisFile` remains supported for a single file. Each mapping uses one shared name or exactly one name per file; a trailing empty entry explicitly represents an unavailable column.
+The launcher converts the path separator to the comma-separated `-f` argument and passes the mappings as `--fcol`, `--iidcol`, `--din`, `--don`, `--DiagTypecol`, `--registercol` (`RegisterColumns`), and `--recnum` (`RecordNumberColumns`). `DiagnosisFile` remains supported for a single file. Each mapping uses one shared name or exactly one name per file; a trailing empty entry explicitly represents an unavailable column.
 
 `OptionalAdditionalFiles` is an administrator-controlled allowlist in `Label=/path|Label=/path` form. Users can select any available entries in addition to `StandardAdditionalFiles`; they cannot enter arbitrary server paths. All `-j` files must use the protocol's configured separator and IID column. GetPheno merges their columns by IID in listed order, with the standard file taking precedence for overlapping nonmissing values.
 
@@ -217,3 +217,5 @@ Rscript shiny_app/tests/test_shiny_server.R
 ```
 
 They validate registry parsing, project access, phenotype counting, safe command construction, Slurm-script execution, job-ID parsing, metadata, submission, and run retrieval. The server test skips cleanly when Shiny is not installed.
+
+With iPSYCH comparison selected, leave phenotype definitions blank to use all eight presets; supplied definitions retain their existing behavior. Configure `RegisterColumns` in the project registry or `registercol` in its INI file.

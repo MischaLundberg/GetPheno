@@ -338,6 +338,65 @@ def test_ipsych_diagnosis_window_requires_both_date_columns():
         )
 
 
+@pytest.mark.parametrize("phenotype,age,end", [
+    ("AFFEK", 10, "2016-01-01"), ("SKIZO", 10, "2016-01-01"),
+    ("SKIZOSPEK", 10, "2016-01-01"), ("BIPOL", 10, "2016-01-01"),
+    ("ASD", 1, "2016-01-01"), ("ADHD", 1, "2016-01-01"),
+    ("ANO", 1, "2017-01-01"),
+])
+def test_ipsych_preset_age_date_and_register_boundaries(phenotype, age, end):
+    birthday = pd.Timestamp("2000-07-01") + pd.DateOffset(years=age)
+    df = pd.DataFrame({
+        "iid": ["001"] * 7,
+        "event": [birthday - pd.Timedelta(days=1), birthday, pd.Timestamp(end) - pd.Timedelta(days=1),
+                  pd.Timestamp(end), birthday, birthday, pd.NaT],
+        "register": ["prefix_pSyK_suffix"] * 4 + ["somatic_LpR", None, "PSYK"],
+    })
+    result = gp.filter_ipsych_preset_records(
+        df, phenotype, pd.DataFrame({"iid": ["001"], "dob": ["2000-07-01"]}),
+        "iid", "dob", "diagnosis", "event",
+    )
+    assert result.index.tolist() == ([1, 2, 4] if phenotype == "ANO" else [1, 2])
+
+
+def test_ipsych_ppd_matches_same_iid_livebirth_and_calendar_year():
+    # Leap year and repeated deliveries: use each diagnosis's latest preceding birth.
+    df = pd.DataFrame({
+        "iid": ["001"] * 7 + ["002", "003"],
+        "event": ["2012-02-29", "2013-02-28", "2013-03-01", "2014-01-01",
+                  "2014-01-01", "2015-01-01", "2015-01-02", "2013-01-01", "2016-01-01"],
+        "register": ["LPR", "PSYK", "PSYK", "LPR", "PSYK", "PSYK", "PSYK", "PSYK", "PSYK"],
+        "diagnosis": ["ICD10:Z37.0", "ICD10:F32", "ICD10:F32", "ICD8:650",
+                      "ICD10:F32", "ICD8:296", "ICD10:F32", "ICD10:F32", "ICD10:F32"],
+    })
+    diagnoses = gp.filter_records_by_register(df, "PSYK")
+    result = gp.filter_ipsych_preset_records(
+        diagnoses, "PPD", pd.DataFrame(), "iid", "dob", "diagnosis", "event",
+        livebirth_codes=["ICD10:Z37.0", "ICD8:650"], birth_records=df,
+    )
+    assert result["event"].tolist() == ["2013-02-28", "2014-01-01", "2015-01-01"]
+    assert gp.filter_ipsych_preset_records(
+        diagnoses, "PPD", pd.DataFrame(), "iid", "dob", "diagnosis", "event",
+        livebirth_codes=[], birth_records=df,
+    ).empty
+
+
+def test_register_filter_and_explicit_source_do_not_create_duplicate_columns():
+    df = pd.DataFrame({"custom": ["x_pSyK_y", "lpr3", None], "source": ["wrong"] * 3,
+                       "register": ["old"] * 3})
+    result = gp.finalize_lpr_data(df, "diagnosis", "dob", "ctype", False, register_col="custom")
+    assert result.columns.is_unique
+    assert gp.filter_records_by_register(result, "PSYK").index.tolist() == [0]
+    assert gp.filter_records_by_register(result, "LPR").index.tolist() == [1]
+    with pytest.raises(ValueError, match="registercol"):
+        gp.filter_records_by_register(pd.DataFrame({"other": [1]}), "PSYK")
+
+
+def test_icd8_numeric_ranges_keep_their_classification():
+    assert gp.expand_ranges("ICD8:650-652") == ["ICD8:650", "ICD8:651", "ICD8:652"]
+    assert gp.expand_ranges("ICD8:290-291") == ["ICD8:290", "ICD8:291"]
+
+
 def test_remove_duplicates_preserve_order():
     lst = [1, 2, 2, 3, 1, 4]
     assert gp.remove_duplicates_preserve_order(lst) == [1, 2, 3, 4]

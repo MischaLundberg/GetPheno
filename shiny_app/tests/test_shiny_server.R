@@ -112,4 +112,26 @@ shiny::testServer(environment$server, {
   stopifnot(nrow(output$run_metadata) == 4L)
 })
 
+shiny::testServer(environment$server, {
+  session$setInputs(
+    project = "test", protocol = "standard",
+    phenotype_mode = "none", iid_subset_mode = "none",
+    lifetime_mode = "none", post_mode = "none", prior_mode = "none",
+    ipsych = TRUE, formats = character(), gender = "", fyob = "",
+    min_max_age = "0,0", death_age_range = "0,0"
+  )
+  session$setInputs(submit = 1)
+  session$flushReact()
+})
+all_runs <- list.dirs(user_root, recursive = FALSE, full.names = TRUE)
+preset_run <- setdiff(all_runs, runs)
+stopifnot(length(preset_run) == 1L)
+preset_metadata <- read.delim(
+  file.path(preset_run, "metadata.tsv"), header = FALSE,
+  col.names = c("key", "value"), sep = "\t", stringsAsFactors = FALSE
+)
+preset_command <- preset_metadata[preset_metadata$key == "command", "value"]
+stopifnot(grepl("--iPSYCHComparison", preset_command, fixed = TRUE))
+stopifnot(!grepl("'-g'", preset_command, fixed = TRUE))
+
 cat("GetPheno Shiny submission and retrieval tests passed.\n")

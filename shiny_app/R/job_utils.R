@@ -46,7 +46,7 @@ read_project_registry <- function(path) {
     "AccessGroup", "Sbatch", "Partition", "Account", "Time", "Memory", "Cpus",
     "FreezePattern", "DiagnosisFile", "DiagnosisFiles", "DiagnosticColumns",
     "IidColumns", "DateInColumns", "DateOutColumns", "DiagnosisTypeColumns",
-    "RecordNumberColumns", "DeathDateColumn", "StandardAdditionalFiles",
+    "RecordNumberColumns", "RegisterColumns", "DeathDateColumn", "StandardAdditionalFiles",
     "OptionalAdditionalFiles", "GeneralExclusionsTemplate", "QcedTemplate"
   )
   for (field in optional) {
@@ -194,6 +194,7 @@ resolve_protocol_files <- function(record, freeze_path = "", selected_additional
     date_in_columns = trim_value(record$DateInColumns),
     date_out_columns = trim_value(record$DateOutColumns),
     diagnosis_type_columns = trim_value(record$DiagnosisTypeColumns),
+    register_columns = trim_value(record$RegisterColumns),
     record_number_columns = trim_value(record$RecordNumberColumns),
     death_date_column = trim_value(record$DeathDateColumn)
   )
@@ -325,7 +326,11 @@ build_getpheno_command <- function(record, run_id, phenotype_file, output_file,
   python <- trim_value(record$Python)
   script <- trim_value(record$GetPheno)
   ini_file <- trim_value(record$IniFile)
-  for (path in c(script, ini_file, phenotype_file)) {
+  phenotype_file <- trim_value(phenotype_file)
+  if (!nzchar(phenotype_file) && !isTRUE(options$ipsych)) {
+    stop("Phenotype definitions are required unless iPSYCH comparison is selected")
+  }
+  for (path in c(script, ini_file, if (nzchar(phenotype_file)) phenotype_file)) {
     if (!file.exists(path)) stop("Required run file is unavailable: ", path)
     if (file.access(path, 4L) != 0L) stop("Required run file is not readable: ", path)
   }
@@ -337,7 +342,7 @@ build_getpheno_command <- function(record, run_id, phenotype_file, output_file,
     stop("Configured Python executable is unavailable or not executable: ", python)
   }
 
-  args <- c(script, "--ini", ini_file, "-g", phenotype_file, "-o", output_file)
+  args <- c(script, "--ini", ini_file, if (nzchar(phenotype_file)) c("-g", phenotype_file), "-o", output_file)
   add_flag <- function(flag, enabled) if (isTRUE(enabled)) flag else character()
   add_value <- function(flag, value) if (nzchar(trim_value(value))) c(flag, trim_value(value)) else character()
   death_date_column <- trim_value(protocol_files$death_date_column %||% "")
@@ -361,6 +366,7 @@ build_getpheno_command <- function(record, run_id, phenotype_file, output_file,
     add_value("--din", protocol_files$date_in_columns %||% ""),
     add_value("--don", protocol_files$date_out_columns %||% ""),
     add_value("--DiagTypecol", protocol_files$diagnosis_type_columns %||% ""),
+    add_value("--registercol", protocol_files$register_columns %||% ""),
     add_value("--recnum", protocol_files$record_number_columns %||% ""),
     add_value("--deathdatecol", death_date_column),
     add_value("--selectIIDs", iid_subset),

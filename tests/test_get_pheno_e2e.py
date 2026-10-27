@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -54,10 +55,15 @@ def _run_getpheno(
     omop_person_map="",
     omop_definitions="",
     omop_output_dir="",
+    phenotype_file="pheno.tsv",
+    register_col="",
+    run_psyk=False,
+    run_lpr=False,
+    verylowmem=False,
 ):
     gp.main(
         ",".join(str(input_dir / path) for path in diagnosis_files.split(",")),
-        str(input_dir / "pheno.tsv"),
+        str(input_dir / phenotype_file) if phenotype_file else "",
         ",".join(str(input_dir / path) for path in stam_files.split(",")),
         ",".join(str(input_dir / path) for path in additional_file.split(","))
         if additional_file else "",
@@ -110,7 +116,7 @@ def _run_getpheno(
         False,
         False,
         lowmem,
-        False,
+        verylowmem,
         batchsize,
         False,
         "",
@@ -121,8 +127,8 @@ def _run_getpheno(
         "",
         "",
         [],
-        False,
-        False,
+        run_lpr,
+        run_psyk,
         ",",
         "",
         str(ini_file or output_path.parent / "missing.ini"),
@@ -147,6 +153,7 @@ def _run_getpheno(
         str(omop_definitions) if omop_definitions else "",
         str(omop_output_dir) if omop_output_dir else "",
         "\t",
+        register_col=register_col,
     )
 
 
@@ -492,3 +499,107 @@ def test_main_ipsych_comparison_matches_fixture(tmp_path, monkeypatch, capsys, l
         output_path,
         FIXTURE_ROOT / "ipsych_comparison" / "expected" / "output.tsv",
     )
+
+
+@pytest.mark.parametrize("lowmem,verylowmem", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("indexed", [False, True])
+def test_main_ipsych_presets_without_definition_file(tmp_path, monkeypatch, lowmem, verylowmem, indexed):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(gp.socket, "gethostname", lambda: "local-test")
+    iids = [f"{number:03}" for number in range(1, 13)]
+    pd.DataFrame({
+        "iid": iids, "birthdate": ["1985-01-01" if iid in ("007", "012") else "2000-01-01" for iid in iids],
+        "sex": ["F"] * 12, "stat": [1] * 12, "fkode": [5100] * 12,
+        "pnr_m": [f"mother-{iid}" for iid in iids], "DKDK": [True] * 12,
+    }).to_csv(tmp_path / "stam.csv", index=False)
+    events = [
+        ("001", "ICD10:F32.1", "2015-12-31", "pSyK"),
+        ("002", "ICD10:F20.0", "2015-01-01", "prefix_PSYK_suffix"),
+        ("003", "ICD10:F31.1", "2015-01-01", "PSYK"),
+        ("004", "ICD10:F84.5", "2001-01-01", "PSYK"),
+        ("005", "ICD10:F90.0", "2001-01-01", "PSYK"),
+        ("006", "ICD10:F50.1", "2016-12-31", "somatic_LpR3"),
+        ("007", "ICD10:Z37.0", "2014-06-01", "LPR"),
+        ("007", "ICD10:F32.0", "2015-06-01", "PSYK"),
+        ("007", "ICD10:F33.0", "2015-06-02", "PSYK"),
+        ("008", "ICD10:F32.0", "2015-01-01", "LPR"),
+        ("009", "ICD10:F32.0", "2009-12-31", "PSYK"),
+        ("010", "ICD10:F50.0", "2017-01-01", "LPR"),
+        ("011", "ICD10:F90.0", "2000-12-31", "PSYK"),
+        ("012", "ICD8:650", "2014-01-01", "LPR"),
+        ("012", "ICD8:296", "2015-01-01", "PSYK"),
+    ]
+    diagnoses = pd.DataFrame(events, columns=["iid", "diagnosis", "date_in", "origin"])
+    diagnoses["date_out"] = diagnoses["date_in"]
+    diagnoses["register"] = "unselected"
+    diagnoses["source"] = "unselected"
+    diagnoses.to_csv(tmp_path / "lpr.csv", index=False)
+    if indexed:
+        gp.index_diag_file(str(tmp_path / "lpr.csv"), index_columns=["iid", "diagnosis"], separator=",")
+    output = tmp_path / "presets.tsv"
+    _run_getpheno(
+        tmp_path, output, phenotype_file="", register_col="origin",
+        ipsych_options={"enabled": True}, lowmem=lowmem, verylowmem=verylowmem, batchsize=3,
+    )
+    result = _read_tsv(output).set_index("iid")
+    assert result.index.tolist() == iids
+    expected_cases = {
+        "AFFEK": {"001", "003", "007"}, "SKIZO": {"002"},
+        "SKIZOSPEK": {"002"}, "BIPOL": {"003"}, "ASD": {"004"},
+        "ADHD": {"005"}, "ANO": {"006"}, "PPD": {"007", "012"},
+    }
+    for name, expected in expected_cases.items():
+        assert set(result.index[result[name] == "Case"]) == expected
+    assert float(result.loc["007", "PPD_n_diags"]) == 1
+
+
+@pytest.mark.parametrize("register_filter", ["PSYK", "LPR"])
+def test_main_register_flag_filters_rows_in_every_input_file(tmp_path, monkeypatch, register_filter):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(gp.socket, "gethostname", lambda: "local-test")
+    pd.DataFrame({"iid": ["001", "002"], "birthdate": ["1985-01-01"] * 2,
+                  "sex": ["F", "M"]}).to_csv(tmp_path / "stam.csv", index=False)
+    for filename, col, sources in [("first.csv", "origin", ["pSyK", "lpr3"]),
+                                   ("second.csv", "registry", ["LPR", "prefix_psyk"] )]:
+        pd.DataFrame({"iid": ["001", "002"], "diagnosis": ["ICD10:F32"] * 2,
+                      "date_in": ["2015-01-01"] * 2, "date_out": ["2015-01-02"] * 2,
+                      col: sources}).to_csv(tmp_path / filename, index=False)
+    (tmp_path / "pheno.tsv").write_text("CUSTOM\tICD10:F32\n")
+    ini = tmp_path / "config.ini"
+    ini.write_text("[Default]\nregistercol = origin,registry\n")
+    output = tmp_path / "selected.tsv"
+    _run_getpheno(
+        tmp_path, output, diagnosis_files="first.csv,second.csv", ini_file=ini,
+        default_args=["--registercol"], run_psyk=register_filter == "PSYK", run_lpr=register_filter == "LPR",
+    )
+    result = _read_tsv(output)
+    assert result["CUSTOM"].tolist() == ["Case", "Case"]
+    assert result["CUSTOM_n_diags"].astype(float).tolist() == [1, 1]
+
+
+def test_cli_presets_index_dtype_and_psyk_preserves_livebirth_evidence(tmp_path):
+    pd.DataFrame({"iid": ["001"], "birthdate": ["1985-01-01"], "sex": ["F"],
+                  "stat": [1], "fkode": [5100], "pnr_m": ["mother"], "DKDK": [True]}).to_csv(
+                      tmp_path / "stam.csv", index=False)
+    pd.DataFrame({
+        "iid": ["001"] * 2, "diagnosis": ["ICD10:Z37.0", "ICD10:F32.1"],
+        "date_in": ["2014-06-01", "2015-06-01"], "date_out": ["2014-06-01", "2015-06-01"],
+        "origin": ["LPR", "PSYK"],
+    }).to_csv(tmp_path / "lpr.csv", index=False)
+    command = [
+        sys.executable, str(REPO_ROOT / "get_pheno.py"),
+        "-f", str(tmp_path / "lpr.csv"), "-i", str(tmp_path / "stam.csv"),
+        "-o", str(tmp_path / "output.tsv"), "--ini", str(tmp_path / "missing.ini"),
+        "--iidcol", "iid", "--fcol", "diagnosis", "--din", "date_in", "--don", "date_out",
+        "--registercol", "origin", "--IndexDtypes", '{"origin":"float"}',
+        "--DateFormat", "%Y-%m-%d", "--iPSYCHComparison", "--PSYK",
+    ]
+    for extra_args in (["--BuildIndex"], []):
+        completed = subprocess.run(command + extra_args, cwd=tmp_path, text=True, capture_output=True)
+        assert completed.returncode == 0, completed.stderr + completed.stdout[-2000:]
+    with pd.HDFStore(tmp_path / "lpr.h5", mode="r") as store:
+        frame = store.select(store.keys()[0])
+    assert frame["origin"].tolist() == ["LPR", "PSYK"]
+    assert frame["iid"].tolist() == ["001", "001"]
+    result = _read_tsv(tmp_path / "output.tsv")
+    assert result["PPD"].tolist() == ["Case"]

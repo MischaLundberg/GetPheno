@@ -109,6 +109,34 @@ logger = logging.getLogger(script_name)
 #################################################################
 #===============================================================#
 #################################################################
+# Affektive Disorders (AFFEK)
+iPSYCH_affek_Codes = ["ICD10:F30-F39"]
+
+# Schizophrenia (SCZ)
+iPSYCH_skizo_Codes = ["ICD10:F20"]
+
+# Schizophrenia Spectrum Disorders (SCZ-SPEC)
+iPSYCH_skizospek_Codes = ["ICD10:F20-F29"]
+
+# Bipolar Disorder (BIP)
+iPSYCH_bip_Codes = ["ICD10:F30-F31"]
+
+# Autism Spectrum Disorders (ASD)
+iPSYCH_asd_Codes = ["ICD10:F84.0", "ICD10:F84.1", "ICD10:F84.5", "ICD10:F84.8", "ICD10:F84.9"]
+
+# Attention Deficit Hyperactivity Disorder (ADHD)
+iPSYCH_adhd_Codes = ["ICD10:F90"]
+
+# Postpartum Diagnosis (PPD)
+iPSYCH_ppd_Codes = ["ICD10:F00-F99", "ICD8:290-315"]
+
+# Annorexia Nervosa (ANO)
+iPSYCH_ano_Codes = ["ICD10:F50.0", "ICD10:F50.1"]
+
+# Livebirth
+iPSYCH_livebirth_Codes = ["ICD10:Z37.0", "ICD10:Z37.2", "ICD10:Z37.3", "ICD10:Z37.5", "ICD10:Z37.6", "ICD8:650-666", ]
+# There are some discrepancies in the ICD-10 codes for live birth across different sources. The codes listed above are commonly used, but it's important to verify them against the specific coding guidelines relevant to your dataset or study.
+# I.e. in this study (DK), they used ICD-8 codes 650-666 and the ICD-10 codes O80-84 https://www.sciencedirect.com/science/article/pii/S1701216324004353?__cf_chl_tk=78i9umkn6iUY.63XbxWWh8ep5P.477mwauosfJJWn4M-1793094154-1.0.1.1-3UnOVSmLhl_zqdflWMu3Gmc5p5VYtgeCmDLdHuq3A9s
 
 # Intellectual Disability / Mental retardation (ID)
 ID_Codes = ["ICD10:F70", "ICD10:F70.0", "ICD10:F70.1", "ICD10:F70.8", "ICD10:F70.9", "ICD10:F71", "ICD10:F71.0", "ICD10:F71.1", 
@@ -653,6 +681,8 @@ def BirthCountry_DK(x):
 
 IPSYCH_COMPARISON_DEFAULTS = {
     "enabled": False,
+    "presets": False,
+    "register_filter": "",
     "birth_start": "1981-05-01",
     "birth_end": "2009-01-01",
     "diagnosis_start": "",
@@ -685,6 +715,83 @@ def normalize_ipsych_comparison_options(options=None):
         "true", "1", "yes"
     )
     return normalized
+
+
+def ipsych_preset_definitions():
+    """Return the supplied iPSYCH code lists and phenotype-specific eligibility."""
+    return OrderedDict([
+        ("AFFEK", (iPSYCH_affek_Codes, 10, "PSYK", "2016-01-01")),
+        ("SKIZO", (iPSYCH_skizo_Codes, 10, "PSYK", "2016-01-01")),
+        ("SKIZOSPEK", (iPSYCH_skizospek_Codes, 10, "PSYK", "2016-01-01")),
+        ("BIPOL", (iPSYCH_bip_Codes, 10, "PSYK", "2016-01-01")),
+        ("ASD", (iPSYCH_asd_Codes, 1, "PSYK", "2016-01-01")),
+        ("ADHD", (iPSYCH_adhd_Codes, 1, "PSYK", "2016-01-01")),
+        ("PPD", (iPSYCH_ppd_Codes, None, "PSYK", "2016-01-01")),
+        ("ANO", (iPSYCH_ano_Codes, 1, "PSYK|LPR", "2017-01-01")),
+    ])
+
+
+def filter_records_by_register(df, pattern, register_col="register"):
+    """Match PSYK/LPR anywhere in the configured source, ignoring case."""
+    if not pattern:
+        return df
+    if register_col not in df.columns:
+        raise ValueError(f"Register filtering requires column '{register_col}'; use --registercol")
+    return df.loc[df[register_col].astype("string").str.contains(
+        pattern, case=False, regex=True, na=False
+    )].copy()
+
+
+def filter_ipsych_preset_records(
+    df, phenotype, metadata, iidcol, birthdatecol, diagnostic_col,
+    input_date_in_name, options=None, livebirth_codes=None, birth_records=None,
+):
+    """Filter diagnosis dates before aggregation; birth evidence uses maternal IIDs."""
+    opts = normalize_ipsych_comparison_options(options)
+    if df.empty:
+        return df.copy()
+    _, minimum_age, register_pattern, end = ipsych_preset_definitions()[phenotype]
+    if input_date_in_name not in df.columns:
+        raise ValueError(f"iPSYCH presets require diagnosis date column '{input_date_in_name}'")
+    out = filter_records_by_register(df, register_pattern)
+    dx_dates = _to_datetime_series(out[input_date_in_name], fmt=DateFormat, dayfirst=DayFirst)
+    keep = dx_dates.notna() & (dx_dates < pd.Timestamp(end))
+    start = _ipsych_boundary(opts["diagnosis_start"], "iPSYCH diagnosis-start")
+    if start is not None:
+        keep &= dx_dates >= start
+    if minimum_age is not None:
+        birth_col = birthdatecol if birthdatecol in metadata.columns else "birthdate"
+        if birth_col not in metadata.columns:
+            raise ValueError("iPSYCH presets require birthdates in IID metadata")
+        birthdays = metadata.drop_duplicates(iidcol).set_index(iidcol)[birth_col]
+        birthdays = _to_datetime_series(birthdays, fmt=DateFormat, dayfirst=DayFirst)
+        eligible_from = out[iidcol].map(birthdays + pd.DateOffset(years=minimum_age))
+        keep &= dx_dates >= eligible_from
+    out = out.loc[keep].copy()
+    if phenotype != "PPD" or out.empty:
+        return out
+    if not livebirth_codes:
+        return out.iloc[0:0].copy()
+    out = out.reset_index(drop=True)
+
+    births = df if birth_records is None else birth_records
+    births = births.loc[match_codes(births[diagnostic_col], livebirth_codes or [], exact=False)]
+    birth_dates = _to_datetime_series(births[input_date_in_name], fmt=DateFormat, dayfirst=DayFirst)
+    birth_table = pd.DataFrame({iidcol: births[iidcol], "birth_date": birth_dates}).dropna()
+    # Find the latest preceding live birth per diagnosis without a many-to-many join.
+    birth_groups = {iid: group["birth_date"].sort_values().to_numpy()
+                    for iid, group in birth_table.groupby(iidcol)}
+    dates = _to_datetime_series(out[input_date_in_name], fmt=DateFormat, dayfirst=DayFirst)
+    postpartum = pd.Series(False, index=out.index)
+    for iid, group in out.groupby(iidcol):
+        deliveries = birth_groups.get(iid)
+        if deliveries is None:
+            continue
+        positions = np.searchsorted(deliveries, dates.loc[group.index].to_numpy(), side="right") - 1
+        found = positions >= 0
+        latest = pd.Series(pd.to_datetime(deliveries[np.maximum(positions, 0)]), index=group.index)
+        postpartum.loc[group.index] = found & (dates.loc[group.index] <= latest + pd.DateOffset(years=1))
+    return out.loc[postpartum].copy()
 
 
 def _ipsych_boundary(value, name):
@@ -1220,7 +1327,7 @@ This file and the contents of the directory it is situated in, was generated by 
         readme += """
 ## iPSYCH-comparison cohort
 
-This run built the user-supplied phenotype definitions directly from diagnosis records after applying the configured birthdate, cohort, and diagnosis-episode restrictions. Only IIDs inside the configured birthdate interval are reported. Diagnosis timing uses both the configured date-in and date-out columns.
+This run built supplied phenotype definitions, or the eight built-in presets when no phenotype file was supplied, after applying the configured cohort restrictions. Supplied definitions use diagnosis-episode overlap. Presets use diagnosis date-in, phenotype-specific source and minimum age, the end of 2015 (2016 for ANO), and live-birth timing for PPD.
 
 When a death-date column was configured, recorded deaths before the first birthday were excluded. Without a configured death-date column, the existing civil-status/status-date rule was used on its own.
 
@@ -1506,6 +1613,7 @@ def build_lpr_input_schema(
     input_date_out_name="",
     ctype_col="",
     lpr_recnummer="",
+    register_col="",
 ):
     """Resolve canonical and per-file column names for one or more -f files."""
     paths = _split_input_paths(lpr_file)
@@ -1519,6 +1627,7 @@ def build_lpr_input_schema(
         ("input_date_out_name", input_date_out_name),
         ("ctype_col", ctype_col),
         ("lpr_recnummer", lpr_recnummer),
+        ("register_col", register_col),
     ])
     option_flags = {
         "diagnostic_col": "--fcol",
@@ -1527,6 +1636,7 @@ def build_lpr_input_schema(
         "input_date_out_name": "--don",
         "ctype_col": "--DiagTypecol",
         "lpr_recnummer": "--recnum",
+        "register_col": "--registercol",
     }
     columns = {}
     for option, value in supplied.items():
@@ -2523,7 +2633,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
          deathdatecol="", MinMaxAgeDeath="0,0", keepAlive=False, onlyDead=False,
          write_omop_cohort=False, omop_person_map="", omop_person_map_iid_col="",
          omop_person_id_col="person_id", omop_cohort_definitions="",
-         omop_output_dir="", omopsep="\t"):
+         omop_output_dir="", omopsep="\t", register_col=""):
     
     ## Add global variables
     global min_Age
@@ -2673,6 +2783,9 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             if("--fcol" in defaultargs and config.has_option(cluster_run, "diagnostic_col")):
                 diagnostic_col = config.get(cluster_run, "diagnostic_col")
                 argstring = argstring+(f"--fcol: {diagnostic_col} (Set by loading config file)\n")
+            if "--registercol" in defaultargs and config.has_option(cluster_run, "registercol"):
+                register_col = config.get(cluster_run, "registercol")
+                argstring += f"--registercol: {register_col} (Set by loading config file)\n"
             if("--gcol" in defaultargs and config.has_option(cluster_run, "pheno_requestcol")):
                 pheno_requestcol = config.get(cluster_run, "pheno_requestcol")
                 argstring = argstring+(f"--gcol: {pheno_requestcol} (Set by loading config file)\n")
@@ -2877,47 +2990,8 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         DayFirst=True
     logger.info(f"[main] DayFirst: {DayFirst}; DateFormat {DateFormat}")
 
-    # In legacy two-source protocols, PSYK is first and LPR is second.
-    lpr_canonical_columns = {}
-    if runLPRonly or runPSYKonly:
-        selected_index = 1 if runLPRonly else 0
-        original_paths = _split_input_paths(lpr_file)
-        original_columns = {
-            "diagnostic_col": diagnostic_col,
-            "iidcol": iidcol,
-            "input_date_in_name": input_date_in_name,
-            "input_date_out_name": input_date_out_name,
-            "ctype_col": ctype_col,
-            "lpr_recnummer": lpr_recnummer,
-        }
-        if len(original_paths) == 2:
-            for option, value in original_columns.items():
-                names = _split_lpr_column_spec(value)
-                if len(names) == len(original_paths) and names[selected_index]:
-                    lpr_canonical_columns[option] = names[0]
-        lpr_file, selected_columns = _select_input_file_variant(
-            lpr_file,
-            selected_index,
-            original_columns,
-        )
-        diagnostic_col = selected_columns["diagnostic_col"]
-        iidcol = selected_columns["iidcol"]
-        input_date_in_name = selected_columns["input_date_in_name"]
-        input_date_out_name = selected_columns["input_date_out_name"]
-        ctype_col = selected_columns["ctype_col"]
-        lpr_recnummer = selected_columns["lpr_recnummer"]
-
-        if lpr2nd_file:
-            lpr2nd_file, selected_secondary_columns = _select_input_file_variant(
-                lpr2nd_file,
-                selected_index,
-                {
-                    "diagnostic2nd_col": diagnostic2nd_col,
-                    "lpr2nd_recnummer": lpr2nd_recnummer,
-                },
-            )
-            diagnostic2nd_col = selected_secondary_columns["diagnostic2nd_col"]
-            lpr2nd_recnummer = selected_secondary_columns["lpr2nd_recnummer"]
+    # Source selection is row-based, independent of file order or file count.
+    ipsych_options["register_filter"] = "LPR" if runLPRonly else "PSYK" if runPSYKonly else ""
 
     if (test_run):
         use_predefined_exdep_exclusions = True
@@ -2936,7 +3010,6 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         input_date_out_name = "date_out"
         general_exclusions = ""
         qced_iids = ""
-        lpr_canonical_columns = {}
 
     phenotype_request_path = pheno_request
 
@@ -2949,16 +3022,13 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             input_date_out_name=input_date_out_name,
             ctype_col=ctype_col,
             lpr_recnummer=lpr_recnummer,
+            register_col=register_col,
         )
     except ValueError as exc:
         logger.error(f"[main] Invalid per-file -f column mapping: {exc}")
         if not verbose:
             print(f"[main] ERROR: {exc}")
         sys.exit(1)
-
-    for option, canonical in lpr_canonical_columns.items():
-        if option in lpr_schema["columns"]:
-            lpr_schema["columns"][option]["canonical"] = canonical
 
     diagnostic_col = _lpr_schema_value(lpr_schema, "diagnostic_col", diagnostic_col)
     iidcol = _lpr_schema_value(lpr_schema, "iidcol", iidcol)
@@ -3007,7 +3077,10 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         set(stam_cols_to_read_as_date + potential_cols_to_read_as_date)
     )
 
-    if (lpr_file == "" or pheno_request == "" or stam_file == ""):
+    ipsych_options["presets"] = ipsych_options["enabled"] and not pheno_request
+    if ipsych_options["presets"] and load_precreated_phenotypes:
+        raise ValueError("iPSYCH presets require raw diagnosis input, without --lpp")
+    if (lpr_file == "" or (pheno_request == "" and not ipsych_options["presets"]) or stam_file == ""):
         logger.info("[main] ERROR: Either lpr_file , stam_file or pheno_request file is not given. Exiting")
         if not verbose:
             print("[main] ERROR: Either lpr_file , stam_file or pheno_request file is not given. Exiting")
@@ -3017,7 +3090,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         preflight_specs = [
             ("lpr_file", lpr_file, fsep, True),
             ("stam_file", stam_file, isep, True),
-            ("pheno_request", pheno_request, gsep, True),
+            ("pheno_request", pheno_request, gsep, not ipsych_options["presets"]),
             ("lpr2nd_file", lpr2nd_file, fsep, False),
             ("addition_information_file", addition_information_file, jsep, False),
             ("LifetimeExclusion", lifetime_exclusions_file, gsep, False),
@@ -3042,6 +3115,25 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         if not verbose:
             print(f"[main] ERROR during input preflight: {exc}")
         sys.exit(1)
+
+    register_required = ipsych_options["presets"] or bool(ipsych_options["register_filter"])
+    lpr_headers = input_headers.get("lpr_file", [])
+    if not register_col and register_required:
+        names = [next((col for col in ("register", "source") if col in item["columns"]), "")
+                 for item in lpr_headers]
+        if not all(names):
+            raise ValueError("Register/source column missing in -f input; specify --registercol")
+        register_col = names[0]
+        lpr_schema["columns"]["register_col"] = {
+            "canonical": register_col, "sources": names,
+            "flag": "--registercol", "explicit_per_file": len(set(names)) > 1,
+        }
+    if register_required:
+        mapping = lpr_schema["columns"]["register_col"]
+        for item, name in zip(lpr_headers, mapping["sources"]):
+            if not name or name not in item["columns"]:
+                raise ValueError(f"Register column '{name}' missing in {item['path']}; use --registercol")
+    register_col = _lpr_schema_value(lpr_schema, "register_col", register_col)
 
     validate_lpr_input_schema_headers(lpr_schema, input_headers.get("lpr_file", []))
 
@@ -3068,11 +3160,15 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             missing_index_columns = [col for col in (file_iidcol, file_diagcol) if not col]
             if missing_index_columns:
                 raise ValueError(f"Cannot index {path}: IID and diagnosis columns are required")
+            file_index_dtypes = index_dtypes.copy()
+            register_mapping = lpr_schema["columns"].get("register_col")
+            if register_mapping and register_mapping["sources"][index]:
+                file_index_dtypes[register_mapping["sources"][index]] = "string"
             index_diag_file(
                 input_csv=path,
                 separator=fsep,
                 index_columns=[file_iidcol, file_diagcol],
-                dtypes=index_dtypes,
+                dtypes=file_index_dtypes,
             )
         if (atc_file != ""):
             index_diag_file(atc_file,fsep,atc_diag_col)
@@ -3116,9 +3212,30 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
         # Read the files for pheno and exclusions 
         ## Process them like usually
     else:
-        print(f"[main] Loading phenotypes from file {pheno_request}")
-        in_pheno_codes, multi_inclusions, normalized_pheno = load_phenotypes(pheno_request=pheno_request, pheno_requestcol=pheno_requestcol, pheno_name=main_pheno_name, icdprefix=icdprefix, noLeadingICD=noLeadingICD, ICDCM=ICDCM, 
-                                                           skip_icd_update=skip_icd_update, exact_match=exact_match, remove_point_in_diag_request=remove_point_in_diag_request)
+        if ipsych_options["presets"]:
+            rows = []
+            normalized_pheno = []
+            for name, (codes, _, _, _) in ipsych_preset_definitions().items():
+                updated = update_icd_coding(
+                    expand_ranges(codes), eM=False, skip=skip_icd_update,
+                    remove_point_in_diag_request=remove_point_in_diag_request,
+                    ICDCM=ICDCM, noLeadingICD=noLeadingICD, icdprefix=icdprefix,
+                )
+                rows.append([name, updated])
+                normalized_pheno.extend(updated)
+            in_pheno_codes = pd.DataFrame(rows, columns=["Disorder", "Disorder Codes"])
+            multi_inclusions = True
+            ipsych_options["livebirth_codes"] = update_icd_coding(
+                expand_ranges(iPSYCH_livebirth_Codes), eM=False, skip=skip_icd_update,
+                remove_point_in_diag_request=remove_point_in_diag_request,
+                ICDCM=ICDCM, noLeadingICD=noLeadingICD, icdprefix=icdprefix,
+            )
+            normalized_pheno.extend(ipsych_options["livebirth_codes"])
+            logger.info("[main] Using built-in iPSYCH presets")
+        else:
+            print(f"[main] Loading phenotypes from file {pheno_request}")
+            in_pheno_codes, multi_inclusions, normalized_pheno = load_phenotypes(pheno_request=pheno_request, pheno_requestcol=pheno_requestcol, pheno_name=main_pheno_name, icdprefix=icdprefix, noLeadingICD=noLeadingICD, ICDCM=ICDCM,
+                                                               skip_icd_update=skip_icd_update, exact_match=exact_match, remove_point_in_diag_request=remove_point_in_diag_request)
         pheno_request_has_atc = contains_atc_codes(in_pheno_codes)
         if pheno_request_has_atc:
             logger.info("[main] ATC codes detected in the phenotype request file.")
@@ -3135,9 +3252,9 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             disorder_codes = in_pheno_codes.iloc[0]["Disorder Codes"]
             logger.info(f"[main] Using standard phenotype format, first disorder = {in_pheno_codes.iloc[0]['Disorder']}, codes = {disorder_codes}")
         ### END NEW
-        logger.info("[main] Finished loading -g file")
+        logger.info("[main] Finished loading phenotype definitions")
         if not verbose:
-            print(f"[main] Finished loading -g file")
+            print("[main] Finished loading phenotype definitions")
         if verbose:
             logger.info("[main] Mem after loading pheno_request input:")
             usage()
@@ -3422,8 +3539,8 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                     IIDsToUse = iids
                 else: 
                     IIDsToUse = []
-                df1 = h5_load_df1(h5_file=h5_file, iids=IIDsToUse, iidcol=iidcol, flattened_pheno_requests=flattened_pheno_requests, exact_match=exact_match, BuildEntryExitDates=BuildEntryExitDates, 
-                                  diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col)
+                df1 = h5_load_df1(h5_file=h5_file, iids=IIDsToUse, iidcol=iidcol, flattened_pheno_requests=flattened_pheno_requests, exact_match=exact_match and not ipsych_options["presets"], BuildEntryExitDates=BuildEntryExitDates,
+                                  diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col, register_col=register_col)
                 df1[iidcol] = normalize_iid_series(df1[iidcol], target="str")
                 df3[iidcol] = normalize_iid_series(df3[iidcol], target="str")
                 if lpr2nd_file:
@@ -3446,6 +3563,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                         birthdatecol=birthdatecol,
                         ctype_col=ctype_col,
                         verbose=verbose,
+                        register_col=register_col,
                     )
                     df1 = merge_secondary_diagnoses(
                         df1=df1,
@@ -3492,10 +3610,10 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 logger.info(f"[main] Loading in low memory mode with h5 file. with df3.head(5):{df3.head(5)}; iidcol:{iidcol}")
                 if not verbose:
                      print(f"[main] Loading in low memory mode with h5 file. with df3.head(5):{df3.head(5)}; iidcol:{iidcol}")
-                df1 = h5_load_df1(h5_file=h5_file, iids=[],iidcol=iidcol, flattened_pheno_requests=flattened_pheno_requests, exact_match=exact_match, BuildEntryExitDates=BuildEntryExitDates, 
-                                diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col)
+                df1 = h5_load_df1(h5_file=h5_file, iids=[],iidcol=iidcol, flattened_pheno_requests=flattened_pheno_requests, exact_match=exact_match and not ipsych_options["presets"], BuildEntryExitDates=BuildEntryExitDates,
+                                diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col, register_col=register_col)
                 # df1 = h5_load_df1(h5_file=h5_file, iids="",iidcol=iidcol, flattened_pheno_requests=flattened_pheno_requests, exact_match=exact_match, BuildEntryExitDates=BuildEntryExitDates, 
-                #                 diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col)
+                #                 diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col, register_col=register_col)
                 df1[iidcol] = normalize_iid_series(df1[iidcol], target="str")
                 df3[iidcol] = normalize_iid_series(df3[iidcol], target="str")
                 if lpr2nd_file:
@@ -3518,6 +3636,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                         birthdatecol=birthdatecol,
                         ctype_col=ctype_col,
                         verbose=verbose,
+                        register_col=register_col,
                     )
                     df1 = merge_secondary_diagnoses(
                         df1=df1,
@@ -3622,8 +3741,8 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                     logger.info(f"[main] Before loading current h5 batch {batch_num + 1}/{num_batches} with df1.head(5):{df1.head(5)}; df3backup:{df3backup}; df3backup[df3backup[iidcol].isin(iid_batch)]:{df3backup[df3backup[iidcol].isin(iid_batch)].head(5)}; iid_batch: {iid_batch[:5]}; iidcol:{iidcol}")
                     if not verbose:
                         print(f"[main] Before loading current h5 batch {batch_num + 1}/{num_batches} with df1.head(5):{df1.head(5)}; df3backup:{df3backup}; df3backup[df3backup[iidcol].isin(iid_batch)]:{df3backup[df3backup[iidcol].isin(iid_batch)].head(5)}; iid_batch: {iid_batch[:5]}; iidcol:{iidcol}")
-                    df1 = h5_load_df1(h5_file=h5_file, iids=iid_batch, iidcol=iidcol, flattened_pheno_requests=flattened_pheno_requests, exact_match=exact_match, BuildEntryExitDates=BuildEntryExitDates, 
-                                  diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col)
+                    df1 = h5_load_df1(h5_file=h5_file, iids=iid_batch, iidcol=iidcol, flattened_pheno_requests=flattened_pheno_requests, exact_match=exact_match and not ipsych_options["presets"], BuildEntryExitDates=BuildEntryExitDates,
+                                  diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col, register_col=register_col)
                     df1 = subset_to_iid_batch(df1, iidcol, iid_batch)
                     df3[iidcol] = normalize_iid_series(df3[iidcol], target="str")
                     if lpr2nd_file and not df1.empty and lpr_recnummer in df1.columns:
@@ -3646,6 +3765,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                             birthdatecol=birthdatecol,
                             ctype_col=ctype_col,
                             verbose=verbose,
+                            register_col=register_col,
                         )
                         df1 = merge_secondary_diagnoses(
                             df1=df1,
@@ -3727,7 +3847,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             #         if not verbose:
             #             print(f"[main] Before loading current h5 batch {batch_num + 1}/{num_batches} with df1.head(5):{df1.head(5)}; df3backup:{df3backup}; df3backup[df3backup[iidcol].isin(iid_batch)]:{df3backup[df3backup[iidcol].isin(iid_batch)].head(5)}; iid_batch: {iid_batch[:5]}; iidcol:{iidcol}")
             #         df1 = h5_load_df1(h5_file=h5_file, iids=iids, iidcol=iidcol, flattened_pheno_requests=flattened_pheno_requests, exact_match=exact_match, BuildEntryExitDates=BuildEntryExitDates, 
-            #                       diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col)
+            #                       diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col, register_col=register_col)
             #         logger.info(f"[main] At the end of loading current h5 batch {batch_num + 1} with df1.head(5):{df1.head(5)}")
             #         gc.collect()
             #         if len(df1) > 0:
@@ -3799,7 +3919,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 logger.info(f"[main] After batch loading lpr file for batch {batch_num + 1} with df1.head(5):{df1.head(5)}; df3backup:{df3backup}; df3backup[df3backup[iidcol].isin(iid_batch)]:{df3backup[df3backup[iidcol].isin(iid_batch)].head(5)}; iid_batch: {iid_batch[:5]}; iidcol:{iidcol}")
                 if not verbose:
                     print(f"[main] After batch loading lpr file for batch {batch_num + 1} with df1.head(5):{df1.head(5)}; df3backup:{df3backup}; df3backup[df3backup[iidcol].isin(iid_batch)]:{df3backup[df3backup[iidcol].isin(iid_batch)].head(5)}; iid_batch: {iid_batch[:5]}; iidcol:{iidcol}")
-                df1 = finalize_lpr_data(df1=df1, diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col, verbose=verbose)
+                df1 = finalize_lpr_data(df1=df1, diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col, verbose=verbose, register_col=register_col)
                 # New 02.12.2025
                 # Normalize IID column in LPR data early to avoid float/string mismatches downstream
                 if iidcol in df1.columns:
@@ -3874,7 +3994,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                 ctype_col=ctype_col,
             )
             
-            df1 = finalize_lpr_data(df1=df1, diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col, verbose=verbose)
+            df1 = finalize_lpr_data(df1=df1, diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col, verbose=verbose, register_col=register_col)
             # New 02.12.2025
             # Normalize IID column in LPR data early to avoid float/string mismatches downstream
             if iidcol in df1.columns:
@@ -4033,6 +4153,7 @@ def index_diag_file(
             engine="python",
             compression="infer",
             sep=separator,
+            dtype={index_columns[0]: str} if index_columns else None,
             chunksize=chunksize
         )
         try:
@@ -4359,7 +4480,7 @@ def get_h5_cases(
         logger.info(f"[get_h5_cases] df.head(5): {df.head(5)}.")
     return df
 
-def h5_load_df1(h5_file, iids, iidcol, flattened_pheno_requests, exact_match, BuildEntryExitDates, diagnostic_col, birthdatecol, ctype_col):
+def h5_load_df1(h5_file, iids, iidcol, flattened_pheno_requests, exact_match, BuildEntryExitDates, diagnostic_col, birthdatecol, ctype_col, register_col=""):
     logger.info(f"""[h5_load_df1] config for get_h5_cases used: h5_file= {h5_file}
             \tiids={iids[:10]}
             \tiidcol={iidcol}
@@ -4374,7 +4495,7 @@ def h5_load_df1(h5_file, iids, iidcol, flattened_pheno_requests, exact_match, Bu
         diagcol = diagnostic_col,
         directmapping = exact_match)
     logger.info(f"[h5_load_df1] h5 based cases: {cases.head(5)}")
-    df1 = finalize_lpr_data(df1=cases, diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col, verbose=verbose)
+    df1 = finalize_lpr_data(df1=cases, diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, ctype_col=ctype_col, verbose=verbose, register_col=register_col)
     if iidcol in df1.columns:
         df1[iidcol] = normalize_iid_series(df1[iidcol], target="str")
 
@@ -5086,7 +5207,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         n_stam_iids = batch_n_iids
     df1 = enforce_iid_universe(df1, iidcol, batch_iid_set, "df1 at process start")
     ipsych_options = normalize_ipsych_comparison_options(ipsych_options)
-    if ipsych_options["enabled"]:
+    if ipsych_options["enabled"] and not ipsych_options["presets"]:
         df1 = filter_records_to_ipsych_date_window(
             df1,
             input_date_in_name=input_date_in_name,
@@ -5177,6 +5298,9 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         if verbose:
             logger.info(f"[process_pheno_and_exclusions] After renaming \"{diagnostic_col}\" to \"diagnosis\". df1.columns:{df1.columns}; df3.columns:{df3.columns}")
     diagnostic_col = "diagnosis"
+    # Keep obstetric evidence before diagnosis-source/type restrictions.
+    livebirth_records = df1
+    df1 = filter_records_by_register(df1, ipsych_options["register_filter"])
     if verbose:
         logger.info("[process_pheno_and_exclusions] Mem after loading all input:")
         usage()
@@ -5316,7 +5440,25 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         values_to_match = set(str(value) for value in in_pheno_codes.loc[in_pheno_codes['Disorder'] == InclusionReason, "Disorder Codes"].iloc[0])
         phenotype_extra_cols = extra_columns_for_codes(values_to_match, cluster_run)
         logger.info(f"[process_pheno_and_exclusions] values_to_match: {values_to_match}")
-        if (InclusionReason == 'ATC' or ATC_Requested == "All") and atc_file != "":
+        if ipsych_options["presets"]:
+            candidates = map_cases(values_to_match, False, df1, diagnostic_col)
+            eligible_records = filter_ipsych_preset_records(
+                candidates, InclusionReason, df3, iidcol, birthdatecol, diagnostic_col,
+                input_date_in_name, options=ipsych_options,
+                livebirth_codes=ipsych_options.get("livebirth_codes", []),
+                birth_records=livebirth_records,
+            )
+            filtered_df = build_phenotype_cases(
+                df1=eligible_records, exact_match=False, values_to_match=values_to_match,
+                diagnostic_col=diagnostic_col, birthdatecol=birthdatecol, iidcol=iidcol,
+                input_date_in_name=input_date_in_name, input_date_out_name=input_date_out_name,
+                verbose=verbose, Covariates=True, Covar_Name=InclusionReason,
+                skip_icd_update=skip_icd_update,
+                remove_point_in_diag_request=remove_point_in_diag_request,
+                ICDCM=ICDCM, noLeadingICD=noLeadingICD, icdprefix=icdprefix,
+                extra_cols_to_keep=extra_cols_to_keep,
+            )
+        elif (InclusionReason == 'ATC' or ATC_Requested == "All") and atc_file != "":
             values_to_match = normalize_atc_codes(values_to_match, atc_diag_expect_prefix)
             logger.info(f"[process_pheno_and_exclusions] Identified that you are running all ATC call based on the following Name: {InclusionReason}")
             logger.info(f"[process_pheno_and_exclusions] values_to_match: {values_to_match}; atc_df1.head(5): {atc_df1.head(5)}")
@@ -6646,7 +6788,7 @@ def expand_ranges(code_list):
                     if lletters:
                         expanded += [f"{use_pref}{lletters}{i}" for i in range(lnum, rnum + 1)]
                     else:
-                        expanded += [str(i) for i in range(lnum, rnum + 1)]
+                        expanded += [f"{use_pref}{i}" for i in range(lnum, rnum + 1)]
                     continue
                 else:
                     expanded.append(code)
@@ -7832,7 +7974,7 @@ def process_lpr_data(lpr_file, lpr2nd_file, dta_input, sep, lpr_cols_to_read_as_
     )
     return df1
 
-def finalize_lpr_data(df1, diagnostic_col, birthdatecol, ctype_col, verbose):
+def finalize_lpr_data(df1, diagnostic_col, birthdatecol, ctype_col, verbose, register_col=""):
     """
     Finalize the loaded LPR data, renaming columns where necessary.
     """
@@ -7871,7 +8013,10 @@ def finalize_lpr_data(df1, diagnostic_col, birthdatecol, ctype_col, verbose):
     #     if verbose:
     #         logger.info("[finalize_lpr_data] Updated type name to 'diagtype'.")
 
-    if "source" in df1.columns:
+    if register_col and register_col in df1.columns and register_col != "register":
+        # Explicit selection wins when both register and source metadata are present.
+        df1["register"] = df1[register_col]
+    elif "source" in df1.columns and "register" not in df1.columns:
         df1.rename(columns={"source": "register"}, inplace=True)
         if verbose:
             logger.info("[finalize_lpr_data] Updated source name to 'register'.")
@@ -8757,9 +8902,9 @@ def update_DxDates_multi_exclusion(
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Extracts a Phenotype from input files based on IIDs and diagnostic codes.\nThe best way to start, is to generate a test dataset: \'python get_phenotype.py -g \"\" -o ./ --BuildTestSet\' and then run \'python get_phenotype.py -g \"\" -o testrun.tsv --eM --ExDepExc --testRun\' ')
     parser.add_argument('--ini', required=False, default = '', help='Load an ini file that contains your data sources. Default: "%(default)s"')
-    parser.add_argument('-g', required=True, help='File with all Diagnostic codes to export')
+    parser.add_argument('-g', default='', help='Phenotype definition file; omit with --iPSYCHComparison to use all eight built-in presets')
     parser.add_argument('-o', required=True, help='Outfile name; dont forget to add the location, otherwise it will be saved in the local dir.') 
-    parser.add_argument('-f', required=False, default='', help='One diagnosis/event file, or multiple comma-separated files. Files may use different column names; map them in the same order with --fcol, --iidcol, --din, --don, --DiagTypecol, and --recnum. No default.')
+    parser.add_argument('-f', required=False, default='', help='One diagnosis/event file, or multiple comma-separated files. Files may use different column names; map them in the same order with --fcol, --iidcol, --din, --don, --DiagTypecol, --registercol, and --recnum. No default.')
     parser.add_argument('--f2', required=False, default='', help='Secondary diagnosis file. This is meant to be used if you have files with secondary diagnosis information as i.e. in Denmark. Here we would usually use the \'recnum\' to merge these entries with \'-f\'. These files also contain less information as the \'-f\' files. Should have at least \"recnum\", and \"diagnosis\" as columns. Names can be defined using --recnum2 and --f2col. The recnum column in the \'-f\' files can be specified using --recnum. Default: "%(default)s"') 
     parser.add_argument('--atc', required=False, default='', help='PRescription information file. Will be handeld simillar to -f but needs additional information to be specified: --atccol. Default: "%(default)s"') 
     parser.add_argument('-i', required=False, default='', help='This file should adds based on a mapping using the supplied \"IID\" column information about Gender/Sex (needed), Brithdate (needed) ... e.g., information from stamdata file. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN protocol)')
@@ -8798,6 +8943,7 @@ if __name__ == '__main__':
     parser.add_argument('--selectIIDs', default='', help='Input file that lists IIDs to use in the analysis. This file should have one IID per row and NO HEADER. Default: "%(default)s"'),
     parser.add_argument('--DiagTypeExclusions', default='', help='List of diagnostic types to exclude. e.g. \"H,M\". Potential c_types may be +,A,B,C,G,M,H. \nA (main diagnosis), B (secondary diagnosis), G (grundmorbus), H (referral), + (secondary diagnosis), C (complication), and M (temporary) are all possible diagnosis types.\nFrom 1995 to 1998, registering a referral diagnosis (H) was optional; thereafter, it became mandatory for certain referral methods. Grundmorbus (G) was optional from 1995 to 2001, used exclusively for psychiatric patients in 2002–2003, and then discontinued entirely. Complication (C) and temporary diagnosis (M) were both discontinued at the end of 2013. \nDefault: "%(default)s"'),
     parser.add_argument('--DiagTypeInclusions', default='', help='List of diagnostic types to include. e.g. \"A,B\". Potential c_types may be +,A,B,C,G,M,H. \nA (main diagnosis), B (secondary diagnosis), G (grundmorbus), H (referral), + (secondary diagnosis), C (complication), and M (temporary) are all possible diagnosis types.\nFrom 1995 to 1998, registering a referral diagnosis (H) was optional; thereafter, it became mandatory for certain referral methods. Grundmorbus (G) was optional from 1995 to 2001, used exclusively for psychiatric patients in 2002–2003, and then discontinued entirely. Complication (C) and temporary diagnosis (M) were both discontinued at the end of 2013. \nDefault: "%(default)s"'),
+    parser.add_argument('--registercol', default='', help='Register/source column in -f; one shared name or one comma-separated name per file. Auto-detects register then source when filtering is required. May also be set as registercol in the INI file.')
     parser.add_argument('--DiagTypecol', default='c_types', help='Diagnosis-type column to include/exclude for -f. Supply one name for every file or one comma-separated name per file; see --DiagTypeInclusions and --DiagTypeExclusions. Default: "%(default)s"'),
     parser.add_argument('--LifetimeExclusion', default='', help='Define Lifetime exclusions (if a case has any of the listed codes, it will be excluded). This should be a file containing either one row with all codes listed (comma separated) or per row a exclusion name, followed by a list of diagnostic codes (similar to the input). e.g. "BPD\tICD10:F30,ICD10:F30.0,ICD10:F30.1,ICD10:F30.2,ICD10:F30.8,ICD10:F30.9,ICD10:F31,ICD10:F31.0,ICD10:F31.1,ICD10:F31.2,ICD10:F31.3,ICD10:F31.4,ICD10:F31.5,ICD10:F31.6,ICD10:F31.7,ICD10:F31.8,ICD10:F31.9"\nIf you are using CHB/DBDS data, please remember, that the ICD10 codes have to start with ICD10:D***, e.g. ICD10:DF33.0. Default: "%(default)s"'),
     parser.add_argument('--PostExclusion', default='', help='Define Post exclusions (if a case has any of the listed codes, all main diagnoses after the first occuring date of the listed codes will be excluded). This should be a file containing either one row with all codes listed (comma separated) or  per row a exclusion name, followed by a list of diagnostic codes (similar to the input). Default: "%(default)s"'),
@@ -8811,11 +8957,11 @@ if __name__ == '__main__':
     parser.add_argument('--keepAlive', action='store_true', help='When --MinMaxAgeDeath is active, retain people with no recorded death in addition to deceased people in the requested age range.')
     parser.add_argument('--onlyDead', action='store_true', help='Retain only people with a recorded death. May be combined with --MinMaxAgeDeath, but not --keepAlive.')
     parser.add_argument('--Fyob', default='', help='Filter by Year of Birth. Everyone before this date will be excluded. Date needs to be given in the following format: \"YYYY-MM-DD\". Default: "%(default)s"'),
-    parser.add_argument('--iPSYCHComparison', '--iPsychComparison', '--ipsych-comparison', dest='ipsych_comparison', action='store_true', help='Build user-supplied phenotypes from raw diagnosis data within an iPSYCH-comparable cohort. Uses -g for phenotype definitions and applies the configured birth, cohort, and diagnosis-date restrictions.')
+    parser.add_argument('--iPSYCHComparison', '--iPsychComparison', '--ipsych-comparison', dest='ipsych_comparison', action='store_true', help='Build phenotypes within an iPSYCH-comparable cohort. With -g, use that file; without -g, use all eight built-in presets with phenotype-specific source, age, date, and postpartum rules.')
     parser.add_argument('--iPSYCHBirthStart', default='1981-05-01', help='Inclusive birthdate boundary for --iPSYCHComparison. Default: "%(default)s"')
     parser.add_argument('--iPSYCHBirthEnd', default='2009-01-01', help='Exclusive birthdate boundary for --iPSYCHComparison. Default: "%(default)s"')
     parser.add_argument('--iPSYCHDxStart', default='', help='Inclusive diagnosis-episode boundary for --iPSYCHComparison. Blank means no lower bound. Default: "%(default)s"')
-    parser.add_argument('--iPSYCHDxEnd', default='2016-01-01', help='Exclusive diagnosis-episode boundary for --iPSYCHComparison. Episodes are evaluated using --din and --don. Default: "%(default)s"')
+    parser.add_argument('--iPSYCHDxEnd', default='2016-01-01', help='Exclusive diagnosis-episode boundary for supplied iPSYCH phenotype files, evaluated using --din and --don. Presets use their phenotype-specific upper dates. Default: "%(default)s"')
     parser.add_argument('--iPSYCHDKParentsCol', default='', help='Optional -i/-j column for reporting whether both parents were born in Denmark. This does not filter the cohort. If blank, DKDK/both_parents_DK is auto-detected or derived from fkode_m/fkode_f. A warning is printed when unavailable. Default: auto-detect.')
     parser.add_argument('--iPSYCHBirthplaceCol', default='fkode', help='Birthplace-code column in -i or -j used for the Danish-birth restriction. Default: "%(default)s"')
     parser.add_argument('--iPSYCHMotherCol', default='pnr_m', help='Maternal identifier column in -i or -j used for maternal-CPR and multiple-birth restrictions. Default: "%(default)s"')
@@ -8846,8 +8992,8 @@ if __name__ == '__main__':
     parser.add_argument('--lowmem', action='store_true', help='Experimental! - This will devide the -f file (if not an h5 indexed file) into groups of each 100.000 individuals (change by using --batchsize), run the phenotype on them, save it to file and then run the next 100k until the end. h5 indexed input (-f) will extract all IIDs that have the requested codes but will not load the full table (see --verylowmem if you need to run it in batches). This will increase the runtime.'),
     parser.add_argument('--verylowmem', action='store_true', help='Experimental! - This will only change the behaviour for h5 indexed files. Plaintext files will behave as with the --lowmem flag. In here we apply the batchloading as of --lowmem to h5 files but only load those that have an overlapping requested code. This will increase the runtime.'),
     parser.add_argument('--batchsize', required=False, default=100000, help='Experimental! - This will set the batches (when --lowmem is set) to the desired value. Default: "%(default)s"'),
-    parser.add_argument('--PSYK', action='store_true', help='Experimental! - To run only based on the PSYK diagnoses.'),
-    parser.add_argument('--LPR', action='store_true', help='Experimental! - To run only based on the LPR diagnoses.'),
+    parser.add_argument('--PSYK', action='store_true', help='Use diagnosis rows whose configured register/source contains PSYK, ignoring case.'),
+    parser.add_argument('--LPR', action='store_true', help='Use diagnosis rows whose configured register/source contains LPR, ignoring case.'),
     parser.add_argument('--BuildIndex', action='store_true', help='Build an initial index file. This applies to -f, and --atc files. Existing Index files will be overwritten.'),
     parser.add_argument('--IndexDtypes', required=False, default='{"iidcol":"int","c_pattype":"float","c_adiag":"string","c_diagtype": "string","register":"string","source":"string","d_inddto":"datetime64[ns]","d_uddto":"datetime64[ns]"}', help='Set the dtype dict for your file that should be indexed. Default: "%(default)s"')
     parser.add_argument('--verbose', action='store_true', help='Verbose output')
@@ -8907,7 +9053,7 @@ if __name__ == '__main__':
          ipsych_options, args.deathdatecol, args.MinMaxAgeDeath, args.keepAlive, args.onlyDead,
          args.write_omop_cohort, args.omopPersonMap, args.omopPersonMapIidCol,
          args.omopPersonIdCol, args.omopCohortDefinitions, args.omopOutputDir,
-         args.omopsep)
+         args.omopsep, register_col=args.registercol)
 
 # If wantig to start it locally in python and run through it step by step
 '''

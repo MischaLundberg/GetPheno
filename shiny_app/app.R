@@ -121,9 +121,10 @@ ui <- navbarPage(
                 "Paste or upload tab-separated definitions, one phenotype per line.",
                 "Example: MDD [tab] ICD10:F32,ICD10:F33.",
                 "Advanced example: MDD [tab] main=ICD10:F32,ICD10:F33;rule_out=ICD10:F25.",
-                "Use sub= for supporting codes. A trailing * always requests prefix matching."
+                "Use sub= for supporting codes. A trailing * always requests prefix matching.",
+                "Leave blank with iPSYCH comparison selected to use all eight presets."
               ),
-              required = TRUE
+              required = FALSE
             ),
             uiOutput("phenotype_name"),
             textOutput("phenotype_summary")
@@ -359,6 +360,7 @@ server <- function(input, output, session) {
   })
 
   active_definition_text <- reactive({
+    if (identical(input$phenotype_mode, "none")) return("")
     if (identical(input$phenotype_mode, "upload")) {
       if (is.null(input$phenotype_file)) return("")
       tryCatch(read_uploaded_text(input$phenotype_file$datapath), error = function(error) "")
@@ -381,6 +383,7 @@ server <- function(input, output, session) {
 
   output$phenotype_summary <- renderText({
     count <- active_phenotype_count()
+    if (!count && isTRUE(input$ipsych)) return("Eight iPSYCH presets selected")
     if (!count) return("No phenotype definition supplied")
     sprintf("%d phenotype%s detected", count, if (count == 1L) "" else "s")
   })
@@ -406,7 +409,7 @@ server <- function(input, output, session) {
       if (!record_is_accessible(record)) stop("Project access is no longer available")
 
       count <- active_phenotype_count()
-      if (count < 1L) stop("Supply a phenotype definition")
+      if (count < 1L && !isTRUE(input$ipsych)) stop("Supply a phenotype definition")
       run_id <- new_run_id()
       user_root <- file.path(record$OutputRoot, app_user)
       if (!dir.exists(user_root) && !dir.create(user_root, recursive = TRUE, mode = "0700")) {
@@ -420,13 +423,13 @@ server <- function(input, output, session) {
       }
       if (!dir.create(run_dir, mode = "0700")) stop("Could not create the run directory")
 
-      phenotype_file <- materialize_definition(
+      phenotype_file <- if (count == 0L && isTRUE(input$ipsych)) NULL else materialize_definition(
         input$phenotype_mode,
         uploaded_path(input$phenotype_file),
         input$phenotype_text,
         file.path(run_dir, paste0(run_id, ".phenotypes.tsv")),
         "Phenotype definition",
-        required = TRUE
+        required = !isTRUE(input$ipsych)
       )
       iid_subset_file <- materialize_definition(
         input$iid_subset_mode,

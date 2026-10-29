@@ -350,7 +350,7 @@ def test_ipsych_preset_age_date_and_register_boundaries(phenotype, age, end):
         "iid": ["001"] * 7,
         "event": [birthday - pd.Timedelta(days=1), birthday, pd.Timestamp(end) - pd.Timedelta(days=1),
                   pd.Timestamp(end), birthday, birthday, pd.NaT],
-        "register": ["prefix_pSyK_suffix"] * 4 + ["somatic_LpR", None, "PSYK"],
+        "register": ["psyc_diag"] * 4 + ["somatic_LpR", None, "PSYK"],
     })
     result = gp.filter_ipsych_preset_records(
         df, phenotype, pd.DataFrame({"iid": ["001"], "dob": ["2000-07-01"]}),
@@ -392,9 +392,55 @@ def test_register_filter_and_explicit_source_do_not_create_duplicate_columns():
         gp.filter_records_by_register(pd.DataFrame({"other": [1]}), "PSYK")
 
 
+@pytest.mark.parametrize("pattern,expected", [
+    ("PSYK", [0, 1, 2]), ("psyk", [0, 1, 2]),
+    ("PSYK|LPR", [0, 1, 2, 3]), ("LPR", [2, 3]),
+])
+def test_register_filter_accepts_psyc_alias(pattern, expected):
+    df = pd.DataFrame({"register": ["psyc_diag", "prefix_PsYc_adm", "lpr_psyk_diag",
+                                    "lpr3_diag", "somatic", None]})
+    assert gp.filter_records_by_register(df, pattern).index.tolist() == expected
+
+
 def test_icd8_numeric_ranges_keep_their_classification():
     assert gp.expand_ranges("ICD8:650-652") == ["ICD8:650", "ICD8:651", "ICD8:652"]
     assert gp.expand_ranges("ICD8:290-291") == ["ICD8:290", "ICD8:291"]
+
+
+@pytest.mark.parametrize("fmt", ["%Y-%m-%d", "%d/%m/%Y", "%Y%m%d"])
+def test_datetime_parser_preserves_parsed_dates_and_iid_index(fmt):
+    dates = pd.Series(pd.to_datetime(["2000-01-15", None, "2015-12-31"]),
+                      index=["001", "002", "003"])
+    result = gp._to_datetime_series(dates, fmt=fmt, dayfirst=True)
+    pd.testing.assert_series_equal(result, dates)
+
+
+def test_datetime_parser_handles_native_dates_mixed_with_raw_input():
+    dates = pd.Series([datetime(2000, 1, 15), date(2001, 2, 16),
+                       "17/03/2002", "invalid", None], dtype=object)
+    result = gp._to_datetime_series(dates, fmt="%d/%m/%Y", dayfirst=True)
+    expected = pd.Series(pd.to_datetime(["2000-01-15", "2001-02-16", "2002-03-17", None, None]))
+    pd.testing.assert_series_equal(result, expected)
+
+
+def test_ipsych_preset_logs_which_eligibility_stage_removed_records(caplog, capsys):
+    df = pd.DataFrame({"iid": ["001"], "event": ["2015-12-31"], "register": ["somatic"]})
+    metadata = pd.DataFrame({"iid": ["001"], "dob": ["2000-01-01"]})
+    with caplog.at_level("INFO", logger=gp.logger.name):
+        result = gp.filter_ipsych_preset_records(
+            df, "ADHD", metadata, "iid", "dob", "diagnosis", "event",
+        )
+    assert result.empty
+    assert "code_matches=1, source_matches=0" in caplog.text
+    assert "Check --registercol" in capsys.readouterr().out
+
+
+def test_map_cases_empty_records_do_not_report_missing_codes(caplog):
+    with caplog.at_level("INFO", logger=gp.logger.name):
+        result = gp.map_cases(["ICD10:DF30"], False, pd.DataFrame(columns=["diagnosis"]), "diagnosis")
+    assert result.empty
+    assert "No diagnosis rows available" in caplog.text
+    assert "No values_to_match supplied" not in caplog.text
 
 
 def test_remove_duplicates_preserve_order():

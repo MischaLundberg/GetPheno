@@ -732,14 +732,20 @@ def ipsych_preset_definitions():
 
 
 def filter_records_by_register(df, pattern, register_col="register"):
-    """Match PSYK/LPR anywhere in the configured source, ignoring case."""
+    """Match PSYK (including PSYC) or LPR anywhere in the source, ignoring case."""
     if not pattern:
         return df
     if register_col not in df.columns:
         raise ValueError(f"Register filtering requires column '{register_col}'; use --registercol")
+    pattern = re.sub("PSYK", "PSY[KC]", pattern, flags=re.IGNORECASE)
     return df.loc[df[register_col].astype("string").str.contains(
         pattern, case=False, regex=True, na=False
     )].copy()
+
+
+def _log_ipsych_preset_counts(phenotype, counts):
+    logger.info("[iPSYCH preset] %s rows: %s", phenotype,
+                ", ".join(f"{stage}={count}" for stage, count in counts.items()))
 
 
 def filter_ipsych_preset_records(
@@ -748,17 +754,33 @@ def filter_ipsych_preset_records(
 ):
     """Filter diagnosis dates before aggregation; birth evidence uses maternal IIDs."""
     opts = normalize_ipsych_comparison_options(options)
+    counts = {"code_matches": len(df)}
     if df.empty:
+        _log_ipsych_preset_counts(phenotype, counts)
         return df.copy()
     _, minimum_age, register_pattern, end = ipsych_preset_definitions()[phenotype]
     if input_date_in_name not in df.columns:
         raise ValueError(f"iPSYCH presets require diagnosis date column '{input_date_in_name}'")
     out = filter_records_by_register(df, register_pattern)
+    counts["source_matches"] = len(out)
+    if out.empty:
+        _emit_ipsych_warning(
+            f"{phenotype}: matching diagnosis codes were found, but no rows match "
+            f"source rule '{register_pattern}' (PSYK also accepts PSYC). "
+            "Check --registercol and its PSYK/PSYC/LPR values."
+        )
     dx_dates = _to_datetime_series(out[input_date_in_name], fmt=DateFormat, dayfirst=DayFirst)
+    counts["valid_dates"] = int(dx_dates.notna().sum())
+    if not out.empty and not dx_dates.notna().any():
+        _emit_ipsych_warning(
+            f"{phenotype}: all matching diagnosis dates are missing or invalid; "
+            "check --din and --DateFormat."
+        )
     keep = dx_dates.notna() & (dx_dates < pd.Timestamp(end))
     start = _ipsych_boundary(opts["diagnosis_start"], "iPSYCH diagnosis-start")
     if start is not None:
         keep &= dx_dates >= start
+    counts["date_window"] = int(keep.sum())
     if minimum_age is not None:
         birth_col = birthdatecol if birthdatecol in metadata.columns else "birthdate"
         if birth_col not in metadata.columns:
@@ -766,11 +788,16 @@ def filter_ipsych_preset_records(
         birthdays = metadata.drop_duplicates(iidcol).set_index(iidcol)[birth_col]
         birthdays = _to_datetime_series(birthdays, fmt=DateFormat, dayfirst=DayFirst)
         eligible_from = out[iidcol].map(birthdays + pd.DateOffset(years=minimum_age))
+        counts["birthdate_matches"] = int(eligible_from.notna().sum())
         keep &= dx_dates >= eligible_from
     out = out.loc[keep].copy()
+    counts["age_and_date_eligible"] = len(out)
     if phenotype != "PPD" or out.empty:
+        _log_ipsych_preset_counts(phenotype, counts)
         return out
     if not livebirth_codes:
+        counts["postpartum_eligible"] = 0
+        _log_ipsych_preset_counts(phenotype, counts)
         return out.iloc[0:0].copy()
     out = out.reset_index(drop=True)
 
@@ -778,6 +805,7 @@ def filter_ipsych_preset_records(
     births = births.loc[match_codes(births[diagnostic_col], livebirth_codes or [], exact=False)]
     birth_dates = _to_datetime_series(births[input_date_in_name], fmt=DateFormat, dayfirst=DayFirst)
     birth_table = pd.DataFrame({iidcol: births[iidcol], "birth_date": birth_dates}).dropna()
+    counts["livebirth_records"] = len(birth_table)
     # Find the latest preceding live birth per diagnosis without a many-to-many join.
     birth_groups = {iid: group["birth_date"].sort_values().to_numpy()
                     for iid, group in birth_table.groupby(iidcol)}
@@ -791,6 +819,8 @@ def filter_ipsych_preset_records(
         found = positions >= 0
         latest = pd.Series(pd.to_datetime(deliveries[np.maximum(positions, 0)]), index=group.index)
         postpartum.loc[group.index] = found & (dates.loc[group.index] <= latest + pd.DateOffset(years=1))
+    counts["postpartum_eligible"] = int(postpartum.sum())
+    _log_ipsych_preset_counts(phenotype, counts)
     return out.loc[postpartum].copy()
 
 
@@ -2251,12 +2281,21 @@ def _to_datetime_series(s: pd.Series, *, fmt: str, dayfirst: bool) -> pd.Series:
     - handles numeric YYYYMMDD (int/float)
     - if fmt given, try it first; then try a few common fallbacks
     """
+    # Loaders and cohort filters also pass already-parsed dates. Reinterpreting
+    # their ISO representation with the original input format can turn them into NaT.
+    if pd.api.types.is_datetime64_any_dtype(s.dtype):
+        return s.copy()
+
     # Work on strings
     s_str = s.astype("string").str.strip().str.replace(r"\.0$", "", regex=True)
 
     out = pd.to_datetime(s_str, format=fmt, errors="coerce") if fmt else pd.to_datetime(
         s_str, errors="coerce", dayfirst=dayfirst
     )
+    if pd.api.types.is_object_dtype(s.dtype):
+        native_dates = s.map(lambda value: isinstance(value, (datetime, date, np.datetime64)))
+        if native_dates.any():
+            out.loc[native_dates] = pd.to_datetime(s.loc[native_dates], errors="coerce")
 
     # Handle remaining NaT as possible YYYYMMDD numerics
     mask_nat = out.isna() & s_str.notna()
@@ -3134,6 +3173,9 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             if not name or name not in item["columns"]:
                 raise ValueError(f"Register column '{name}' missing in {item['path']}; use --registercol")
     register_col = _lpr_schema_value(lpr_schema, "register_col", register_col)
+    if register_required:
+        logger.info("[iPSYCH comparison] Register/source mapping: %s -> %s",
+                    lpr_schema["columns"]["register_col"]["sources"], "register")
 
     validate_lpr_input_schema_headers(lpr_schema, input_headers.get("lpr_file", []))
 
@@ -7093,6 +7135,9 @@ def map_cases(values_to_match, exact_match, df1, diagcol, cols=None):
         exact_set, prefixes = set(), []
         out = pd.DataFrame()
         try:
+            if df1.empty:
+                logger.info("[map_cases] No diagnosis rows available for code matching.")
+                return out
             if values_to_match is not None and not df1.empty:
                 for d in map(str, values_to_match):
                     d = d.strip()
@@ -8992,7 +9037,7 @@ if __name__ == '__main__':
     parser.add_argument('--lowmem', action='store_true', help='Experimental! - This will devide the -f file (if not an h5 indexed file) into groups of each 100.000 individuals (change by using --batchsize), run the phenotype on them, save it to file and then run the next 100k until the end. h5 indexed input (-f) will extract all IIDs that have the requested codes but will not load the full table (see --verylowmem if you need to run it in batches). This will increase the runtime.'),
     parser.add_argument('--verylowmem', action='store_true', help='Experimental! - This will only change the behaviour for h5 indexed files. Plaintext files will behave as with the --lowmem flag. In here we apply the batchloading as of --lowmem to h5 files but only load those that have an overlapping requested code. This will increase the runtime.'),
     parser.add_argument('--batchsize', required=False, default=100000, help='Experimental! - This will set the batches (when --lowmem is set) to the desired value. Default: "%(default)s"'),
-    parser.add_argument('--PSYK', action='store_true', help='Use diagnosis rows whose configured register/source contains PSYK, ignoring case.'),
+    parser.add_argument('--PSYK', action='store_true', help='Use diagnosis rows whose configured register/source contains PSYK or PSYC, ignoring case.'),
     parser.add_argument('--LPR', action='store_true', help='Use diagnosis rows whose configured register/source contains LPR, ignoring case.'),
     parser.add_argument('--BuildIndex', action='store_true', help='Build an initial index file. This applies to -f, and --atc files. Existing Index files will be overwritten.'),
     parser.add_argument('--IndexDtypes', required=False, default='{"iidcol":"int","c_pattype":"float","c_adiag":"string","c_diagtype": "string","register":"string","source":"string","d_inddto":"datetime64[ns]","d_uddto":"datetime64[ns]"}', help='Set the dtype dict for your file that should be indexed. Default: "%(default)s"')

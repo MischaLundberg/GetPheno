@@ -171,14 +171,16 @@ Without `-g`, the supplied `iPSYCH_*_Codes` definitions produce these columns:
 
 | Preset | Register contains (case insensitive) | Minimum age at diagnosis | Last diagnosis date (inclusive) |
 | --- | --- | --- | --- |
-| AFFEK, BIPOL, SKIZOSPEK, SKIZO | PSYK | 10 years | 2015-12-31 |
-| ADHD, ASD | PSYK | 1 year | 2015-12-31 |
-| ANO | PSYK or LPR | 1 year | 2016-12-31 |
-| PPD | PSYK | No additional age threshold | 2015-12-31 |
+| AFFEK, BIPOL, SKIZOSPEK, SKIZO | PSYK or PSYC | 10 years | 2015-12-31 |
+| ADHD, ASD | PSYK or PSYC | 1 year | 2015-12-31 |
+| ANO | PSYK, PSYC, or LPR | 1 year | 2016-12-31 |
+| PPD | PSYK or PSYC | No additional age threshold | 2015-12-31 |
 
 PPD additionally requires a supplied live-birth code on the mother's own IID, dated from the diagnosis date back through one calendar year. Birth day and first anniversary are included. All available birth events are considered, including LPR events when `--PSYK` selects psychiatric diagnoses. Presets match diagnosis-code prefixes, including subcodes, regardless of `--eM`. `--iPSYCHDxStart` optionally adds a lower diagnosis-date boundary; preset-specific upper dates take precedence over `--iPSYCHDxEnd`. Custom `-g` definitions retain their existing matching and date-window behavior.
 
-`--registercol origin` selects the register/source column; `registercol = origin` configures it in the INI file. A comma-separated mapping supports different names across `-f` files. When filtering is needed and no name is supplied, each file is checked for `register`, then `source`. Missing required columns cause an error. `--PSYK` and `--LPR` filter rows by substring in this column across every file; file order no longer selects the source. `IndexDtypes` controls storage types only; configured register columns are stored as strings when indexing.
+`--registercol origin` selects the register/source column; `registercol = origin` configures it in the INI file. A comma-separated mapping supports different names across `-f` files. When filtering is needed and no name is supplied, each file is checked for `register`, then `source`. Missing required columns cause an error. `--PSYK` and `--LPR` filter rows by substring in this column across every file; file order no longer selects the source. Psychiatric source rules accept both `PSYK` and `PSYC`, including names such as `psyc_diag` and `lpr_psyk_diag`. `IndexDtypes` controls storage types only; configured register columns are stored as strings when indexing.
+
+The run log records the register-column mapping and `[iPSYCH preset]` row counts after code matching, source matching, date parsing, date/age eligibility, and postpartum eligibility. Warnings identify matching codes lost entirely to source selection or invalid dates. Already-parsed dates are preserved when applying these rules; `--DateFormat` is used to parse raw input values.
 
 The cohort metadata used by these rules may be supplied in either the STAM file (`-i`) or the additional-information file (`-j`). GetPheno combines both tables by IID before applying the restrictions, then limits both tables to the retained IID universe. Birthdate remains required in `-i`. A death-date column is optional: datasets containing only `stat` continue to use the status-only rule.
 
@@ -312,7 +314,7 @@ optional arguments:
   --BuildIndex          Build an indexed HDF5 file for faster repeated low-memory runs.
   --IndexDtypes         JSON dtype mapping used while building HDF5 indexes.
   --registercol         Register/source column; shared name or one name per -f file (also INI: registercol).
-  --PSYK                Keep rows whose register/source contains PSYK (case insensitive).
+  --PSYK                Keep rows whose register/source contains PSYK or PSYC (case insensitive).
   --LPR                 Keep rows whose register/source contains LPR (case insensitive).
   --verbose             Verbose output
 ```

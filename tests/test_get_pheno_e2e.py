@@ -60,6 +60,7 @@ def _run_getpheno(
     run_psyk=False,
     run_lpr=False,
     verylowmem=False,
+    date_format="%Y-%m-%d",
 ):
     gp.main(
         ",".join(str(input_dir / path) for path in diagnosis_files.split(",")),
@@ -97,7 +98,7 @@ def _run_getpheno(
         False,
         False,
         True,
-        "%Y-%m-%d",
+        date_format,
         status_col,
         status_date_col,
         "",
@@ -503,24 +504,27 @@ def test_main_ipsych_comparison_matches_fixture(tmp_path, monkeypatch, capsys, l
 
 @pytest.mark.parametrize("lowmem,verylowmem", [(False, False), (True, False), (False, True)])
 @pytest.mark.parametrize("indexed", [False, True])
-def test_main_ipsych_presets_without_definition_file(tmp_path, monkeypatch, lowmem, verylowmem, indexed):
+@pytest.mark.parametrize("date_format", ["%Y-%m-%d", "%d/%m/%Y"])
+def test_main_ipsych_presets_without_definition_file(tmp_path, monkeypatch, lowmem, verylowmem, indexed, date_format):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(gp.socket, "gethostname", lambda: "local-test")
     iids = [f"{number:03}" for number in range(1, 13)]
-    pd.DataFrame({
+    stam = pd.DataFrame({
         "iid": iids, "birthdate": ["1985-01-01" if iid in ("007", "012") else "2000-01-01" for iid in iids],
         "sex": ["F"] * 12, "stat": [1] * 12, "fkode": [5100] * 12,
         "pnr_m": [f"mother-{iid}" for iid in iids], "DKDK": [True] * 12,
-    }).to_csv(tmp_path / "stam.csv", index=False)
+    })
+    stam["birthdate"] = pd.to_datetime(stam["birthdate"]).dt.strftime(date_format)
+    stam.to_csv(tmp_path / "stam.csv", index=False)
     events = [
         ("001", "ICD10:F32.1", "2015-12-31", "pSyK"),
-        ("002", "ICD10:F20.0", "2015-01-01", "prefix_PSYK_suffix"),
+        ("002", "ICD10:F20.0", "2015-01-01", "prefix_PsYc_suffix"),
         ("003", "ICD10:F31.1", "2015-01-01", "PSYK"),
-        ("004", "ICD10:F84.5", "2001-01-01", "PSYK"),
-        ("005", "ICD10:F90.0", "2001-01-01", "PSYK"),
+        ("004", "ICD10:F84.5", "2001-01-01", "PSYC"),
+        ("005", "ICD10:F90.0", "2001-01-01", "psyc_diag"),
         ("006", "ICD10:F50.1", "2016-12-31", "somatic_LpR3"),
         ("007", "ICD10:Z37.0", "2014-06-01", "LPR"),
-        ("007", "ICD10:F32.0", "2015-06-01", "PSYK"),
+        ("007", "ICD10:F32.0", "2015-06-01", "psyc_diag"),
         ("007", "ICD10:F33.0", "2015-06-02", "PSYK"),
         ("008", "ICD10:F32.0", "2015-01-01", "LPR"),
         ("009", "ICD10:F32.0", "2009-12-31", "PSYK"),
@@ -531,6 +535,8 @@ def test_main_ipsych_presets_without_definition_file(tmp_path, monkeypatch, lowm
     ]
     diagnoses = pd.DataFrame(events, columns=["iid", "diagnosis", "date_in", "origin"])
     diagnoses["date_out"] = diagnoses["date_in"]
+    for col in ("date_in", "date_out"):
+        diagnoses[col] = pd.to_datetime(diagnoses[col]).dt.strftime(date_format)
     diagnoses["register"] = "unselected"
     diagnoses["source"] = "unselected"
     diagnoses.to_csv(tmp_path / "lpr.csv", index=False)
@@ -540,6 +546,7 @@ def test_main_ipsych_presets_without_definition_file(tmp_path, monkeypatch, lowm
     _run_getpheno(
         tmp_path, output, phenotype_file="", register_col="origin",
         ipsych_options={"enabled": True}, lowmem=lowmem, verylowmem=verylowmem, batchsize=3,
+        date_format=date_format,
     )
     result = _read_tsv(output).set_index("iid")
     assert result.index.tolist() == iids
@@ -559,7 +566,7 @@ def test_main_register_flag_filters_rows_in_every_input_file(tmp_path, monkeypat
     monkeypatch.setattr(gp.socket, "gethostname", lambda: "local-test")
     pd.DataFrame({"iid": ["001", "002"], "birthdate": ["1985-01-01"] * 2,
                   "sex": ["F", "M"]}).to_csv(tmp_path / "stam.csv", index=False)
-    for filename, col, sources in [("first.csv", "origin", ["pSyK", "lpr3"]),
+    for filename, col, sources in [("first.csv", "origin", ["psyc_diag", "lpr3"]),
                                    ("second.csv", "registry", ["LPR", "prefix_psyk"] )]:
         pd.DataFrame({"iid": ["001", "002"], "diagnosis": ["ICD10:F32"] * 2,
                       "date_in": ["2015-01-01"] * 2, "date_out": ["2015-01-02"] * 2,
@@ -584,7 +591,7 @@ def test_cli_presets_index_dtype_and_psyk_preserves_livebirth_evidence(tmp_path)
     pd.DataFrame({
         "iid": ["001"] * 2, "diagnosis": ["ICD10:Z37.0", "ICD10:F32.1"],
         "date_in": ["2014-06-01", "2015-06-01"], "date_out": ["2014-06-01", "2015-06-01"],
-        "origin": ["LPR", "PSYK"],
+        "origin": ["LPR", "psyc_diag"],
     }).to_csv(tmp_path / "lpr.csv", index=False)
     command = [
         sys.executable, str(REPO_ROOT / "get_pheno.py"),
@@ -599,7 +606,7 @@ def test_cli_presets_index_dtype_and_psyk_preserves_livebirth_evidence(tmp_path)
         assert completed.returncode == 0, completed.stderr + completed.stdout[-2000:]
     with pd.HDFStore(tmp_path / "lpr.h5", mode="r") as store:
         frame = store.select(store.keys()[0])
-    assert frame["origin"].tolist() == ["LPR", "PSYK"]
+    assert frame["origin"].tolist() == ["LPR", "psyc_diag"]
     assert frame["iid"].tolist() == ["001", "001"]
     result = _read_tsv(tmp_path / "output.tsv")
     assert result["PPD"].tolist() == ["Case"]

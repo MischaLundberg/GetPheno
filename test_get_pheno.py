@@ -29,6 +29,127 @@ def test_match_codes_exact_and_prefix():
     assert gp.match_codes(pd.Series(["ATC:N06A", "ATC:N06AB"]), ["ATC:N06A"], exact=False).tolist() == [True, True]
 
 
+def test_opr_detection_and_normalization_preserve_namespace(monkeypatch):
+    assert gp.contains_opr_codes("main=ICD10:F32;sub=opr:KAAA*")
+    assert not gp.contains_opr_codes("ATC:N06A,ICD10:K20")
+    monkeypatch.setattr(gp, "cluster_run", "CHB_DBDS")
+    result = gp.update_icd_coding(["opr:K.AAA*"], eM=True, noLeadingICD=True,
+                                  icdprefix="D", remove_point_in_diag_request=True)
+    assert result == ["OPR:KAAA*"]
+
+
+@pytest.mark.parametrize('codes', ['f20*', ['f20*'], ['F20*', '', None]])
+def test_scalar_and_lowercase_wildcards_match_whole_codes(codes):
+    frame = pd.DataFrame({'iid': ['yes', 'other'], 'diagnosis': ['f201', 'F99']})
+    assert gp.map_cases(codes, True, frame, 'diagnosis')['iid'].tolist() == ['yes']
+    assert gp.match_codes(frame['diagnosis'], codes, True).tolist() == [True, False]
+
+
+@pytest.mark.parametrize('pattern,expected', [
+    ('ICD10:F00*-F02*', ['ICD10:F00*', 'ICD10:F01*', 'ICD10:F02*']),
+    ('ICD10-CM:F00*-F02*', ['ICD10-CM:F00*', 'ICD10-CM:F01*', 'ICD10-CM:F02*']),
+    ('OPR:KAAA001*-KAAA003*', ['OPR:KAAA001*', 'OPR:KAAA002*', 'OPR:KAAA003*']),
+    ('001*-003*', ['001*', '002*', '003*']),
+    ('ICD8:300.39-ICD10:305.39', ['ICD8:300.39-ICD10:305.39']),
+])
+def test_wildcard_ranges_preserve_width_and_namespace(pattern, expected):
+    assert gp.expand_ranges(pattern) == expected
+
+
+@pytest.mark.parametrize('code_request,stored', [('icd10-cm:f2*', 'F201'), ('opr:kaaa*', 'KAAA001')])
+def test_indexed_wildcard_namespaces_accept_legacy_bare_codes(tmp_path, code_request, stored):
+    path = tmp_path / 'namespaces.h5'
+    family = code_request.split(':')[0]
+    frame = pd.DataFrame({'iid': ['001', '002', '003'],
+                          'diagnosis': [stored, family + ':' + stored.lower(), 'OTHER:' + stored]})
+    frame.to_hdf(path, key='df', format='table', data_columns=True)
+    result = gp.get_h5_cases(str(path), [], 'iid', [code_request], 'diagnosis')
+    assert result['iid'].tolist() == ['001', '002']
+
+
+def test_opr_filters_are_explicit_and_support_literal_wildcards():
+    frame = pd.DataFrame({'origin': ['psyc_diag', 'LPR', 'PSYK', None],
+                          'kind': ['A+', 'A+', 'X', 'A+']})
+    assert gp.filter_opr_records(frame, {}).equals(frame)
+    rules = gp.normalize_opr_filters(['origin=PSY*,LPR', 'kind=A+'], ['origin=LPR'])
+    assert gp.filter_opr_records(frame, {'filters': rules}).index.tolist() == [0]
+    with pytest.raises(ValueError, match='column.*missing'):
+        gp.filter_opr_records(frame, {'filters': gp.normalize_opr_filters(['absent=A'])})
+    with pytest.raises(ValueError, match='COLUMN=PATTERN'):
+        gp.normalize_opr_filters(['origin'])
+
+
+def test_opr_filter_column_mapping_is_explicit():
+    frame = pd.DataFrame({'diagtype': ['M', 'B']})
+    options = {'filters': gp.normalize_opr_filters(['c_types=M']),
+               'fallback_columns': {'c_types': 'diagtype'}}
+    assert gp.filter_opr_records(frame, options, fallback=True).index.tolist() == [0]
+
+
+@pytest.mark.parametrize('explicit,has_out', [(False, False), (False, True), (True, True)])
+def test_opr_date_columns_inherit_lpr_and_out_is_optional(tmp_path, monkeypatch, explicit, has_out):
+    monkeypatch.setattr(gp, 'DateFormat', '%Y-%m-%d')
+    monkeypatch.setattr(gp, 'DayFirst', False)
+    start, end = ('started', 'finished') if explicit else ('date_in', 'date_out')
+    frame = pd.DataFrame({'iid': ['001', '002'], 'opr': ['K001', 'K002'],
+                          start: ['2015-01-01', '2015-02-01']})
+    if has_out:
+        frame[end] = ['2015-01-03', None]
+    path = tmp_path / 'procedures.csv'
+    frame.to_csv(path, index=False)
+    options = {'file': str(path), 'code_col': 'opr', 'requested': True,
+               'date_col': start if explicit else '', 'date_out_col': end if explicit else ''}
+    gp.configure_opr_input(options, 'iid', 'date_in', ',', 'date_out')
+    result = gp.load_opr_records(options, {'001', '002'}, 'iid', 'date_in', 'date_out', {})
+    assert result['date_in'].tolist() == list(pd.to_datetime(['2015-01-01', '2015-02-01']))
+    assert result['date_out'].tolist() == list(pd.to_datetime([
+        '2015-01-03' if has_out else '2015-01-01', '2015-02-01']))
+    options['date_out_col'] = 'absent_explicit_column'
+    with pytest.raises(ValueError, match='absent_explicit_column'):
+        gp.configure_opr_input(options, 'iid', 'date_in', ',', 'date_out')
+
+
+def test_opr_multiple_files_can_omit_one_out_date_column(tmp_path, monkeypatch):
+    monkeypatch.setattr(gp, 'DateFormat', '%Y-%m-%d')
+    first, second = tmp_path / 'one.csv', tmp_path / 'two.csv'
+    pd.DataFrame({'iid': ['001'], 'opr': ['K001'], 'date_in': ['2015-01-01']}).to_csv(first, index=False)
+    pd.DataFrame({'iid': ['002'], 'opr': ['K001'], 'date_in': ['2015-02-01'],
+                  'ended': ['2015-02-03']}).to_csv(second, index=False)
+    options = {'file': f'{first},{second}', 'code_col': 'opr', 'date_out_col': ',ended', 'requested': True}
+    gp.configure_opr_input(options, 'iid', 'date_in', ',', 'date_out')
+    result = gp.load_opr_records(options, {'001', '002'}, 'iid', 'date_in', 'date_out', {})
+    assert result['date_out'].tolist() == list(pd.to_datetime(['2015-01-01', '2015-02-03']))
+
+
+def test_compound_wildcards_normalize_without_losing_sub_marker(monkeypatch):
+    monkeypatch.setattr(gp, 'cluster_run', 'CHB_DBDS')
+    rules = gp.parse_pheno_rules('main=icd10:f20*+sub;sub=icd10:z*', exact_match=True,
+                                 noLeadingICD=True, icdprefix='D')
+    assert rules['main'] == ['DF20*+sub']
+    frame = pd.DataFrame({'pnr': ['yes', 'yes', 'no', 'other'],
+                          'diagnosis': ['DF201', 'DZ01', 'DF202', 'DF99'],
+                          'diagtype': ['A', 'B', 'A', 'A'], 'date_in': ['2015-01-01'] * 4})
+    result = gp.detect_advanced_cases(frame, rules, 'date_in', True, 'diagnosis', 'pnr')
+    assert set(result['pnr']) == {'yes'}
+    assert gp.detect_advanced_cases(frame.iloc[:0], rules, 'date_in', True, 'diagnosis', 'pnr').empty
+
+
+@pytest.mark.parametrize("exact", [False, True])
+def test_opr_matching_accepts_bare_codes_but_rejects_other_namespaces(exact):
+    values = pd.Series(["KAAA001", "opr:kaaa001", "ICD10:KAAA001", "ATC:KAAA001", None])
+    assert gp.match_codes(values, ["OPR:KAAA*"], exact).tolist() == [True, True, False, False, False]
+    assert gp.map_cases(["OPR:KAAA*"], exact, pd.DataFrame({"diagnosis": values}), "diagnosis").index.tolist() == [0, 1]
+
+
+def test_opr_hdf_preselection_preserves_namespace_and_legacy_values(tmp_path):
+    path = tmp_path / "opr.h5"
+    pd.DataFrame({"iid": ["001", "002", "003", "004"],
+                  "diagnosis": ["OPR:KAAA001", "kaaa001", "opr:kaaa001", "ICD10:KAAA001"]}).to_hdf(
+                      path, key="df", format="table", data_columns=True)
+    result = gp.get_h5_cases(str(path), [], "iid", ["OPR:KAAA001"], "diagnosis")
+    assert result["iid"].tolist() == ["001", "002", "003"]
+
+
 def test_wildcards_are_allowed_with_and_without_exact_match():
     df = pd.DataFrame({
         "iid": ["a", "b", "c", "d", "e", "f"],
@@ -41,6 +162,53 @@ def test_wildcards_are_allowed_with_and_without_exact_match():
 
     assert set(prefix_hits["iid"]) == {"a", "b", "c", "d"}
     assert set(exact_hits["iid"]) == {"a", "b", "c"}
+
+
+@pytest.mark.parametrize("exact", [False, True])
+def test_internal_wildcard_matches_suffix_and_literal_decimal(exact):
+    codes = ["ICD8:297.29", "ICD8:297.89", "ICD8:297.9", "ICD8:297.1239",
+             "ICD8:297.291", "ICD8:297X29", "ICD8:298.29", None]
+    df = pd.DataFrame({"iid": range(len(codes)), "diagnosis": codes})
+    expected = [True] * 4 + [False] * 4
+    assert gp.match_codes(df["diagnosis"], ["ICD8:297.*9"], exact).tolist() == expected
+    assert gp.map_cases(["ICD8:297.*9"], exact, df, "diagnosis")["iid"].tolist() == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("exact", [False, True])
+def test_multiple_wildcards_allow_empty_segments_and_escape_other_symbols(exact):
+    series = pd.Series(["A+B.C", "A+xxByy.C", "A+B.Cextra", "AAABxC", "A+Byy.C"])
+    assert gp.match_codes(series, ["A+*B*.C"], exact).tolist() == [True, True, False, False, True]
+    assert gp.match_codes(series, ["A+*B*.C*"], exact).tolist() == [True, True, True, False, True]
+
+
+@pytest.mark.parametrize("pattern,expected,hits", [
+    ("ICD8:297.*9", "297*9", [True, True, False, True]),
+    ("ICD8:*97.9", "*979", [False, False, False, True]),
+    ("ICD8:*9", "*9", [True, True, False, True]),
+])
+def test_internal_wildcard_survives_icd8_normalization(monkeypatch, pattern, expected, hits):
+    monkeypatch.setattr(gp, "cluster_run", "CHB_DBDS")
+    monkeypatch.setattr(gp, "only_ICD10", False)
+    monkeypatch.setattr(gp, "only_ICD9", False)
+    codes = gp.update_icd_coding([pattern], eM=True, remove_point_in_diag_request=True, noLeadingICD=True)
+    assert codes == [expected]
+    assert gp.match_codes(pd.Series(["29729", "29789", "297291", "2979"]), codes, exact=True).tolist() == hits
+
+
+@pytest.mark.parametrize("prefix_all", [False, True])
+def test_indexed_internal_wildcard_preserves_icd_system_and_iids(tmp_path, prefix_all):
+    path = tmp_path / "wildcard.h5"
+    df = pd.DataFrame({
+        "iid": ["001", "002", "003", "004", "005", "006"],
+        "diagnosis": ["ICD8:297.29", "297.89", "ICD10:297.29", "ICD8:297.291",
+                      "ICD8:297X29", "ICD8:297.19"],
+    })
+    df.to_hdf(path, key="df", format="table", data_columns=True)
+    result = gp.select_by_iid_and_diag_optimized(
+        str(path), "df", "iid", ["001", "002", "003", "004", "005"],
+        "diagnosis", ["ICD8:297.*9"], prefix_all=prefix_all, chunksize=2,
+    )
+    assert result["iid"].tolist() == ["001", "002"]
 
 
 def test_advanced_map_cases_keeps_every_wildcard_code():
@@ -75,6 +243,108 @@ def test_expanded_ranges_follow_exact_match_mode():
     assert requested == ["ICD10:T36", "ICD10:T37", "ICD10:T38"]
     assert set(prefix_hits["iid"]) == {"a", "b", "c", "d", "e"}
     assert set(exact_hits["iid"]) == {"a", "c", "d"}
+
+
+@pytest.mark.parametrize("pattern,prefix", [
+    ("F20*-F29*", "F"), ("ICD10:F20*-F29*", "ICD10:F"),
+    ("ICD10:F20*-ICD10:F29*", "ICD10:F"), ("F20-F29*", "F"),
+])
+def test_wildcard_category_ranges_expand_with_every_wildcard(pattern, prefix):
+    assert gp.expand_ranges(pattern) == [f"{prefix}{i}*" for i in range(20, 30)]
+
+
+@pytest.mark.parametrize("pattern", ["F20*-F29*", "ICD10:F20*-ICD10:F29*"])
+def test_wildcard_range_request_normalizes_and_matches_subcodes(tmp_path, monkeypatch, pattern):
+    monkeypatch.setattr(gp, "cluster_run", "CHB_DBDS")
+    monkeypatch.setattr(gp, "only_ICD10", False)
+    monkeypatch.setattr(gp, "only_ICD9", False)
+    monkeypatch.setattr(gp, "only_ICD8", False)
+    request = tmp_path / "range.tsv"
+    request.write_text(f"SCZ\t{pattern}\n")
+    definitions, _, normalized = gp.load_phenotypes(
+        str(request), "diagnosis", exact_match=True, noLeadingICD=True,
+        icdprefix="D", remove_point_in_diag_request=True,
+    )
+    assert set(normalized) == {f"DF{i}*" for i in range(20, 30)}
+    df = pd.DataFrame({"iid": ["a", "b", "c", "d"],
+                       "diagnosis": ["DF20", "DF201", "DF298", "DF30"]})
+    codes = definitions.iloc[0]["Disorder Codes"]
+    assert set(gp.map_cases(codes, True, df, "diagnosis")["iid"]) == {"a", "b", "c"}
+
+
+def test_numeric_wildcard_ranges_preserve_system_and_invalid_ranges():
+    assert gp.expand_ranges("ICD8:290*-292*") == ["ICD8:290*", "ICD8:291*", "ICD8:292*"]
+    assert gp.expand_ranges("F20*-F20*") == ["F20*"]
+    assert gp.expand_ranges("F29*-F20*") == ["F29*-F20*"]
+    assert gp.expand_ranges("F20.1*-F20.9*") == [f"F20.{i}*" for i in range(1, 10)]
+
+
+@pytest.mark.parametrize("pattern,prefix,suffix", [
+    ("ICD8:300.39-305.39", "ICD8:", ".39"),
+    ("ICD8:300.39-ICD8:305.39", "ICD8:", ".39"),
+    ("300.39-305.39", "", ".39"),
+    ("ICD8:300.09-305.09", "ICD8:", ".09"),
+    ("ICD8:300.39*-305.39*", "ICD8:", ".39*"),
+    ("ICD10:F300.39-F305.39", "ICD10:F", ".39"),
+])
+def test_ranges_preserve_shared_decimal_suffix(pattern, prefix, suffix):
+    assert gp.expand_ranges(pattern) == [f"{prefix}{i}{suffix}" for i in range(300, 306)]
+
+
+@pytest.mark.parametrize("pattern", ["ICD8:305.39-300.39", "ICD8:300.39-305.49", "ICD8:300.39-305"])
+def test_reversed_or_differing_decimal_ranges_remain_unexpanded(pattern):
+    assert gp.expand_ranges(pattern) == [pattern]
+
+
+@pytest.mark.parametrize("pattern,prefix,suffix", [
+    ("298.29-298.99", "", ""),
+    ("ICD8:298.29-298.99", "ICD8:", ""),
+    ("ICD8:298.29-ICD8:298.99", "ICD8:", ""),
+    ("ICD8:298.29*-298.99*", "ICD8:", "*"),
+])
+def test_decimal_interval_includes_every_hundredth(pattern, prefix, suffix):
+    assert gp.expand_ranges(pattern) == [f"{prefix}298.{i:02d}{suffix}" for i in range(29, 100)]
+
+
+def test_decimal_interval_preserves_precision_and_rejects_ambiguous_bounds():
+    assert gp.expand_ranges("298.02-298.09") == [f"298.{i:02d}" for i in range(2, 10)]
+    assert gp.expand_ranges("298.2-298.9") == [f"298.{i}" for i in range(2, 10)]
+    assert gp.expand_ranges("298.99-298.29") == ["298.99-298.29"]
+    assert gp.expand_ranges("298.2-298.99") == ["298.2-298.99"]
+
+
+def test_decimal_interval_preserves_exact_bounds_after_normalization(tmp_path, monkeypatch):
+    monkeypatch.setattr(gp, "cluster_run", "CHB_DBDS")
+    monkeypatch.setattr(gp, "only_ICD10", False)
+    monkeypatch.setattr(gp, "only_ICD9", False)
+    monkeypatch.setattr(gp, "only_ICD8", False)
+    request = tmp_path / "interval.tsv"
+    request.write_text("MATCH\tICD8:298.29-298.99\n")
+    definitions, _, normalized = gp.load_phenotypes(
+        str(request), "diagnosis", exact_match=True,
+        noLeadingICD=True, remove_point_in_diag_request=True,
+    )
+    assert set(normalized) == {f"298{i:02d}" for i in range(29, 100)}
+    df = pd.DataFrame({"iid": ["a", "b", "c", "d", "e"],
+                       "diagnosis": ["29829", "29830", "29899", "29828", "298999"]})
+    assert set(gp.map_cases(definitions.iloc[0]["Disorder Codes"], True, df, "diagnosis")["iid"]) == {"a", "b", "c"}
+
+
+def test_decimal_range_request_preserves_suffix_during_normalization(tmp_path, monkeypatch):
+    monkeypatch.setattr(gp, "cluster_run", "CHB_DBDS")
+    monkeypatch.setattr(gp, "only_ICD10", False)
+    monkeypatch.setattr(gp, "only_ICD9", False)
+    monkeypatch.setattr(gp, "only_ICD8", False)
+    request = tmp_path / "decimal_range.tsv"
+    request.write_text("MATCH\tICD8:300.39-305.39\n")
+    definitions, _, normalized = gp.load_phenotypes(
+        str(request), "diagnosis", exact_match=True,
+        noLeadingICD=True, remove_point_in_diag_request=True,
+    )
+    assert set(normalized) == {f"{i}39" for i in range(300, 306)}
+    df = pd.DataFrame({"iid": ["a", "b", "c", "d"],
+                       "diagnosis": ["30039", "30539", "30138", "30639"]})
+    assert set(gp.map_cases(definitions.iloc[0]["Disorder Codes"], True, df, "diagnosis")["iid"]) == {"a", "b"}
 
 
 def test_remove_leading_icd_and_format_numeric():
@@ -932,21 +1202,32 @@ def test_select_input_file_variant_keeps_matching_column_names():
     }
 
 
-def test_build_temp_file_and_load_mapping_rows(monkeypatch, tmp_path):
-    # create a small file
-    csvp = tmp_path / "big.csv"
-    df = pd.DataFrame({"id": [f"id{i}" for i in range(10)], "v": list(range(10))})
-    df.to_csv(csvp, index=False)
-    # load_mapping_rows should identify row indices
-    rows = gp.load_mapping_rows(str(csvp), iidcol="id", target_iids=["id1", "id3"], sep=",")
-    assert isinstance(rows, list)
-    # Monkeypatch subprocess.run used in build_temp_file to avoid awk on system
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: None)
-    # call build_temp_file with the indices from load_mapping_rows
-    tempf = tmp_path / "filtered_temp.csv"
-    index_file = tmp_path / "row_indices.txt"
-    gp.build_temp_file(str(csvp), [1, 3], temp_file=str(tempf), index_file=str(index_file), verbose=True)
-    # Because we monkeypatched subprocess.run, file may not be created; ensure the function ran without exception
+@pytest.mark.parametrize("sep", [",", "\t"])
+def test_build_temp_file_and_load_mapping_rows(tmp_path, sep):
+    source = tmp_path / "input with spaces; $literal.csv"
+    frame = pd.DataFrame({
+        "id": ["001.0", " 002 ", "003", "004"],
+        "note": ["first\ncontinued", 'a "quoted" value', "other", "last\nline"],
+    })
+    frame.to_csv(source, sep=sep, index=False)
+    rows = gp.load_mapping_rows(str(source), "id", ["001", "002.0", "004"], sep=sep, chunksize=2)
+    assert rows == [1, 2, 3, 5]
+    target = tmp_path / "output with spaces; $literal.csv"
+    gp.build_temp_file(str(source), rows, temp_file=str(target))
+    pd.testing.assert_frame_equal(
+        pd.read_csv(target, sep=sep, dtype=str), frame.iloc[[0, 1, 3]].reset_index(drop=True)
+    )
+
+
+def test_batch_input_errors_are_not_empty_selections(tmp_path):
+    source = tmp_path / "input.tsv"
+    source.write_text("wrong_column\n1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Usecols"):
+        gp.load_mapping_rows(str(source), "iid", ["1"])
+    target = tmp_path / "filtered.tsv"
+    with pytest.raises(FileNotFoundError):
+        gp.build_temp_file(str(tmp_path / "missing.tsv"), [1, 2], temp_file=str(target))
+    assert not target.exists()
 
 
 def test_map_cases_and_build_phenotype_cases_basic():

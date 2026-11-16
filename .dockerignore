@@ -7,8 +7,12 @@ __pycache__
 .DS_Store
 .vscode
 .continue
+.codex
 misc
 shiny_app/projects.conf
 .env
 .env.*
 !.env.docker.example
+graphify-out
+Agents.md
+MANUSCRIPT_DRAFT.md

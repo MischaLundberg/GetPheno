@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-
-
 from __future__ import annotations
 import argparse
 import configparser
@@ -13,8 +11,10 @@ import random
 import re
 import socket
 import sqlite3
+import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 import warnings
 import logging
@@ -90,7 +90,7 @@ min_Age = -1
 max_Age = -1
 DK_clusters = ("NCRR_DST", "IBP_DST", "IBP_computerome", "iPSYCH", "CHB_DBDS", "DBDS_DST")
 KNOWN_ICD_PREFIXES = ("ICD10-CM:", "ICD9-CM:", "ICD10:", "ICD9:", "ICD8:")
-__version__ = "V1.31_Alpha-27.10.2026"
+__version__ = "V1.33_Alpha-16.11.2026"
 disclaimer_text = (
     f"GetPheno version: {__version__}\n"
     "Disclaimer:\n"
@@ -1238,40 +1238,48 @@ def match_codes_old(series, codes, exact=False):
     else:
         return series.apply(lambda d: any(d.startswith(p) for p in codes))
     
+def _code_match_mask(series, codes, exact=False, opr_namespace=True):
+    """Match literal codes or whole-code glob patterns; only * is special."""
+    exact_codes, prefixes, wildcards, opr_codes = set(), [], [], []
+    if isinstance(codes, str):
+        codes = [codes]
+    for value in codes if codes is not None else []:
+        if value is None or pd.isna(value):
+            continue
+        code = str(value).strip().upper()
+        if not code:
+            continue
+        if opr_namespace and code.startswith("OPR:"):
+            opr_codes.append(code[4:].upper())
+            continue
+        if "*" in code:
+            if code.endswith("*") and "*" not in code[:-1]:
+                prefixes.append(code[:-1])
+            else:
+                wildcards.append(re.escape(code).replace(r"\*", ".*"))
+        elif exact:
+            exact_codes.add(code)
+        else:
+            prefixes.append(code)
+    s = series.astype("string").str.strip().str.upper()
+    mask = s.isin(exact_codes)
+    if prefixes:
+        mask |= s.str.startswith(tuple(prefixes), na=False)
+    if wildcards:
+        mask |= s.str.fullmatch("|".join(wildcards), na=False)
+    if opr_codes:
+        upper = s.str.upper()
+        eligible = ~upper.str.contains(":", regex=False, na=False) | upper.str.startswith("OPR:", na=False)
+        bodies = upper.str.replace(r"^OPR:", "", regex=True)
+        mask |= eligible & _code_match_mask(bodies, opr_codes, exact)
+    return mask.fillna(False)
+
+
 def match_codes(series, codes, exact=False):
-    """Match codes in a series with support for exact matches and prefix matching."""
+    """Match codes case-insensitively, allowing * anywhere in a code."""
     if codes is None or len(codes) == 0:
         return pd.Series([True] * len(series), index=series.index)
-    
-    # Normalize codes to list of strings
-    codes_list = [str(c).strip() for c in codes if c is not None]
-    
-    # Separate exact matches and prefix matches (wildcards)
-    exact_set = set()
-    prefixes = []
-    
-    for code in codes_list:
-        if code.endswith('*'):
-            prefixes.append(code[:-1])  # Remove wildcard for prefix matching
-        elif exact:
-            exact_set.add(code)
-        else:
-            prefixes.append(code)  # Default to prefix matching if not exact
-    
-    # Apply matching logic
-    s = series.astype(str).str.strip().str.upper()
-    
-    if exact and exact_set:
-        mask = s.isin(exact_set)
-    else:
-        mask = pd.Series([False] * len(s), index=s.index)
-    
-    # Add prefix matches
-    if prefixes:
-        for prefix in prefixes:
-            mask |= s.str.startswith(prefix.upper(), na=False)
-    
-    return mask
+    return _code_match_mask(series, codes, exact)
 
 def generate_readme(flags_used, default_args, multiplePhenotypes=False, disclaimer_text="", additional_cols=[], selected_pickle=False, selected_PLINK=False, selected_FastGWA=False, Exclusions=False, phenotypes=[], ExDep=False, checksum_file="checksums.sha256", selected_OMOP=False):
     def parse_argstring_to_dict(argstring):
@@ -1552,7 +1560,7 @@ def format_numeric(entry, Mode, pad_decimal=True):
     entry_str = str(entry)
     integer_part, sep, decimal_part = entry_str.partition('.')
     # For the specified modes, pad the integer part to 3 digits.
-    integer_formatted = integer_part.zfill(3) if eM and integer_part else integer_part
+    integer_formatted = integer_part.zfill(3) if eM and integer_part and "*" not in integer_part else integer_part
     # Pad the decimal part to the right only if present and eM is True.
     decimal_formatted = decimal_part.ljust(2, "0") if eM and pad_decimal and decimal_part else decimal_part
     return f"{integer_formatted}.{decimal_formatted}" if sep else integer_formatted
@@ -1582,7 +1590,7 @@ def _read_input_header(path, sep=","):
     if path.lower().endswith((".dta", ".stata")):
         try:
             with pd.read_stata(path, iterator=True) as reader:
-                return reader.read(0).columns.tolist()
+                return list(reader.variable_labels())
         except TypeError:
             return pd.read_stata(path).head(0).columns.tolist()
     read_options = {"sep": sep, "nrows": 0}
@@ -1781,15 +1789,155 @@ def _iter_code_tokens(value):
 def contains_atc_codes(value):
     return any(str(token).strip().upper().startswith("ATC:") for token in _iter_code_tokens(value))
 
+def contains_opr_codes(value):
+    return any(str(token).strip().upper().startswith("OPR:") for token in _iter_code_tokens(value))
+
 def file_contains_atc_codes(path):
+    return file_contains_code_family(path, "ATC")
+
+
+def file_contains_code_family(path, family):
     for file_path in _split_input_paths(path):
         if not file_path or not os.path.exists(file_path):
             continue
         with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                if contains_atc_codes(line):
+                if any(token.upper().startswith(f"{family}:") for token in _iter_code_tokens(line)):
                     return True
     return False
+
+
+def normalize_opr_filters(include=None, exclude=None):
+    """Parse explicit COLUMN=PATTERN[,PATTERN] rules; blank means unrestricted."""
+    rules = []
+    for values, flag, excluded in ((include, '--oprFilter', False), (exclude, '--oprExclude', True)):
+        if isinstance(values, str):
+            values = [values]
+        for value in values or []:
+            for expression in str(value).split(';'):
+                if not expression.strip():
+                    continue
+                column, separator, patterns = expression.partition('=')
+                patterns = [p.strip() for p in patterns.split(',')]
+                if not separator or not column.strip() or not all(patterns):
+                    raise ValueError(f'{flag} requires COLUMN=PATTERN[,PATTERN]: {expression!r}')
+                rules.append({'column': column.strip(), 'patterns': patterns,
+                              'exclude': excluded, 'flag': flag})
+    return rules
+
+
+def filter_opr_records(frame, options, fallback=False):
+    """Apply only the user-supplied OPR column/value rules."""
+    keep = pd.Series(True, index=frame.index)
+    aliases = options.get('fallback_columns', {}) if fallback else {}
+    for rule in options.get('filters', []):
+        column = rule['column']
+        if column not in frame.columns:
+            column = aliases.get(column, column)
+        if column not in frame.columns:
+            raise ValueError(f"{rule['flag']} column '{rule['column']}' is missing from OPR input")
+        matched = _code_match_mask(frame[column], rule['patterns'], exact=True, opr_namespace=False)
+        keep &= ~matched if rule['exclude'] else matched
+    return frame.loc[keep].copy()
+
+
+def configure_opr_input(options, iidcol, date_col, sep, date_out_col=""):
+    """Validate OPR sources only after a procedure request has been detected."""
+    options["sep"] = options.get("sep") or sep
+    if options["sep"] == r"\t":
+        options["sep"] = "\t"
+    schema = build_lpr_input_schema(
+        options["file"], options["code_col"], options.get("iid_col") or iidcol,
+        input_date_in_name=options.get("date_col") or date_col,
+    )
+    out_names = _split_lpr_column_spec(options.get('date_out_col') or date_out_col)
+    if out_names:
+        per_file = len(out_names) > 1
+        if len(out_names) == 1:
+            out_names *= len(schema['paths'])
+        elif len(out_names) != len(schema['paths']):
+            raise ValueError('--oprdateoutcol requires one name or one per OPR file')
+        schema['columns']['input_date_out_name'] = {
+            'canonical': date_out_col or date_col, 'sources': out_names,
+            'flag': '--oprdateoutcol', 'explicit_per_file': per_file,
+        }
+    for key, flag in (("diagnostic_col", "--oprcol"), ("iidcol", "--opriidcol"),
+                      ("input_date_in_name", "--oprdatecol")):
+        if key not in schema["columns"]:
+            raise ValueError(f"OPR input requires {flag} or its standard-input default")
+    headers = preflight_input_files([("opr_file", options["file"], options["sep"], True)])["opr_file"]
+    for index, item in enumerate(headers):
+        for rule in options.get('filters', []):
+            if rule['column'] not in item['columns']:
+                raise ValueError(f"{rule['flag']} column '{rule['column']}' is missing from {item['path']}")
+        for option, mapping in schema["columns"].items():
+            name = mapping["sources"][index]
+            if option == 'input_date_out_name' and (
+                    not name or (not options.get('date_out_col') and name not in item['columns'])):
+                continue
+            if not name or name not in item["columns"]:
+                raise ValueError(f"OPR input {item['path']} is missing required column '{name}'")
+    options["schema"] = schema
+
+
+def load_opr_records(options, allowed_iids, iidcol, date_in_col, date_out_col, ipsych_options):
+    """Stream requested procedure records into the standard event schema."""
+    columns = list(dict.fromkeys([iidcol, "diagnosis", date_in_col, date_out_col]))
+    if not options.get("requested") or not options.get("file"):
+        return pd.DataFrame(columns=columns)
+    frames = []
+    schema = options["schema"]
+    extra_dates = options.get("date_cols") or []
+    if isinstance(extra_dates, str):
+        extra_dates = [name.strip() for name in extra_dates.split(",") if name.strip()]
+    for index, path in enumerate(schema["paths"]):
+        source_iid = schema["columns"]["iidcol"]["sources"][index]
+        source_code = schema["columns"]["diagnostic_col"]["sources"][index]
+        source_date = schema["columns"]["input_date_in_name"]["sources"][index]
+        out_mapping = schema['columns'].get('input_date_out_name')
+        source_out = out_mapping['sources'][index] if out_mapping else ''
+        if path.lower().endswith((".dta", ".stata")):
+            reader = pd.read_stata(path, chunksize=100000, convert_categoricals=False)
+        else:
+            read_options = {"sep": options["sep"], "chunksize": 100000,
+                            "dtype": {source_iid: "string", source_code: "string"}}
+            read_options['dtype'].update({r['column']: 'string' for r in options.get('filters', [])})
+            if _separator_requires_python_engine(options["sep"]):
+                read_options["engine"] = "python"
+            reader = pd.read_csv(path, **read_options)
+        try:
+            for chunk in reader:
+                ids = normalize_iid_series(chunk[source_iid], target="str")
+                chunk = chunk.loc[ids.isin(allowed_iids)].copy()
+                chunk = filter_opr_records(chunk, options)
+                if chunk.empty:
+                    continue
+                codes = chunk[source_code].astype("string").str.strip().str.upper().str.replace(r"^OPR:", "", regex=True)
+                if options.get("remove_point"):
+                    codes = codes.str.replace(".", "", regex=False)
+                records = pd.DataFrame({iidcol: ids.loc[chunk.index], "diagnosis": "OPR:" + codes})
+                for name in set(extra_dates + [source_date, source_out]):
+                    if name in chunk:
+                        chunk[name] = _to_datetime_series(chunk[name], fmt=DateFormat, dayfirst=DayFirst)
+                records[date_in_col] = chunk[source_date]
+                records[date_out_col] = (chunk[source_out].fillna(chunk[source_date])
+                                         if source_out in chunk else chunk[source_date])
+                for name in NON_ATC_EXTRA_COLUMNS:
+                    if name in chunk:
+                        records[name] = chunk[name]
+                if "register" not in records:
+                    records["register"] = "OPR"
+                records['_opr_event'] = True
+                frames.append(records.loc[codes.notna() & codes.ne("")])
+        finally:
+            reader.close()
+    result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)
+    if ipsych_options.get("enabled"):
+        result = filter_records_to_ipsych_date_window(
+            result, date_in_col, date_out_col, options=ipsych_options, label="OPR",
+        )
+    logger.info("[OPR] Loaded %s rows for %s IIDs in the current batch", len(result), result[iidcol].nunique())
+    return result
 
 def normalize_atc_codes(values, expect_prefix=None):
     """
@@ -2189,90 +2337,113 @@ def export_omop_cohort(
         resolved.append(row)
 
     os.makedirs(output_dir, exist_ok=True)
-    cohort_path = os.path.join(output_dir, "COHORT.tsv")
-    definitions_path_out = os.path.join(output_dir, "COHORT_DEFINITION.tsv")
-    provenance_path = os.path.join(output_dir, "GETPHENO_PROVENANCE.json")
-    temp_cohort = cohort_path + ".tmp"
-    wrote_rows = False
-    missing_mapping_count = 0
-    try:
-        for chunk in pd.read_csv(result_path, sep="\t", dtype=str, keep_default_na=False, chunksize=100000):
-            chunk[iidcol] = normalize_iid_series(chunk[iidcol], target="str")
-            for row in resolved:
-                status = chunk[row["_status_column"]].astype(str).str.strip()
-                selections = [(
-                    status.eq(row.get("case_value", "") or "Case"),
-                    row["cohort_definition_id"],
-                    row["_start_column"],
-                    row["_end_column"] if row["cohort_end_policy"] != "start" else "",
-                )]
-                if row.get("control_cohort_definition_id", ""):
-                    selections.append((
-                        status.eq(row.get("control_value", "") or "Control"),
-                        row["control_cohort_definition_id"],
-                        row["control_start_date_column"],
-                        row.get("control_end_date_column", ""),
-                    ))
-                for mask, definition_id, start_col, end_col in selections:
-                    selected = chunk.loc[mask, [iidcol, start_col] + ([end_col] if end_col and end_col != start_col else [])].copy()
-                    if selected.empty:
-                        continue
-                    selected["subject_id"] = selected[iidcol].map(person_lookup)
-                    missing_mapping_count += int(selected["subject_id"].isna().sum())
-                    starts = pd.to_datetime(selected[start_col], errors="coerce")
-                    ends = pd.to_datetime(selected[end_col], errors="coerce") if end_col else starts
-                    if starts.isna().any() or ends.isna().any():
-                        raise ValueError(f"OMOP cohort {definition_id} has members with missing or invalid index dates")
-                    if (ends < starts).any():
-                        raise ValueError(f"OMOP cohort {definition_id} has an end date before its start date")
-                    cohort = pd.DataFrame({
-                        "cohort_definition_id": definition_id,
-                        "subject_id": selected["subject_id"],
-                        "cohort_start_date": starts.dt.strftime("%Y-%m-%d"),
-                        "cohort_end_date": ends.dt.strftime("%Y-%m-%d"),
-                    }, columns=OMOP_COHORT_COLUMNS)
-                    cohort.to_csv(temp_cohort, sep="\t", index=False, mode="a", header=not wrote_rows)
-                    wrote_rows = True
-        if missing_mapping_count:
-            raise ValueError(f"OMOP person map has no person_id for {missing_mapping_count} exported cohort memberships")
-        if not wrote_rows:
-            pd.DataFrame(columns=OMOP_COHORT_COLUMNS).to_csv(temp_cohort, sep="\t", index=False)
-        os.replace(temp_cohort, cohort_path)
-    except Exception:
-        if os.path.exists(temp_cohort):
-            os.remove(temp_cohort)
-        raise
+    output_paths = [os.path.join(output_dir, name) for name in (
+        "COHORT.tsv", "COHORT_DEFINITION.tsv", "GETPHENO_PROVENANCE.json"
+    )]
+    with tempfile.TemporaryDirectory(prefix=".getpheno-omop-", dir=output_dir) as staging:
+        cohort_path, definitions_path_out, provenance_path = [
+            os.path.join(staging, os.path.basename(path)) for path in output_paths
+        ]
+        temp_cohort = cohort_path
+        wrote_rows = False
+        missing_mapping_count = 0
+        try:
+            for chunk in pd.read_csv(result_path, sep="\t", dtype=str, keep_default_na=False, chunksize=100000):
+                chunk[iidcol] = normalize_iid_series(chunk[iidcol], target="str")
+                for row in resolved:
+                    status = chunk[row["_status_column"]].astype(str).str.strip()
+                    selections = [(
+                        status.eq(row.get("case_value", "") or "Case"),
+                        row["cohort_definition_id"],
+                        row["_start_column"],
+                        row["_end_column"] if row["cohort_end_policy"] != "start" else "",
+                    )]
+                    if row.get("control_cohort_definition_id", ""):
+                        selections.append((
+                            status.eq(row.get("control_value", "") or "Control"),
+                            row["control_cohort_definition_id"],
+                            row["control_start_date_column"],
+                            row.get("control_end_date_column", ""),
+                        ))
+                    for mask, definition_id, start_col, end_col in selections:
+                        selected = chunk.loc[mask, [iidcol, start_col] + ([end_col] if end_col and end_col != start_col else [])].copy()
+                        if selected.empty:
+                            continue
+                        selected["subject_id"] = selected[iidcol].map(person_lookup)
+                        missing_mapping_count += int(selected["subject_id"].isna().sum())
+                        starts = pd.to_datetime(selected[start_col], errors="coerce")
+                        ends = pd.to_datetime(selected[end_col], errors="coerce") if end_col else starts
+                        if starts.isna().any() or ends.isna().any():
+                            raise ValueError(f"OMOP cohort {definition_id} has members with missing or invalid index dates")
+                        if (ends < starts).any():
+                            raise ValueError(f"OMOP cohort {definition_id} has an end date before its start date")
+                        cohort = pd.DataFrame({
+                            "cohort_definition_id": definition_id,
+                            "subject_id": selected["subject_id"],
+                            "cohort_start_date": starts.dt.strftime("%Y-%m-%d"),
+                            "cohort_end_date": ends.dt.strftime("%Y-%m-%d"),
+                        }, columns=OMOP_COHORT_COLUMNS)
+                        cohort.to_csv(temp_cohort, sep="\t", index=False, mode="a" if wrote_rows else "w", header=not wrote_rows)
+                        wrote_rows = True
+            if missing_mapping_count:
+                raise ValueError(f"OMOP person map has no person_id for {missing_mapping_count} exported cohort memberships")
+            if not wrote_rows:
+                pd.DataFrame(columns=OMOP_COHORT_COLUMNS).to_csv(temp_cohort, sep="\t", index=False)
+        except Exception:
+            if os.path.exists(temp_cohort):
+                os.remove(temp_cohort)
+            raise
 
-    definitions.to_csv(definitions_path_out, sep="\t", index=False)
-    definition_ids = set(definitions["cohort_definition_id"].astype(int))
-    _validate_omop_cohort_file(cohort_path, definition_ids)
-    provenance = {
-        "generator": "GetPheno",
-        "getpheno_version": __version__,
-        "generated_at_utc": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-        "source_files": {
-            "phenotype_request": {
-                "name": os.path.basename(phenotype_request),
-                "sha256": _sha256_file(phenotype_request),
-            } if phenotype_request and os.path.exists(phenotype_request) else None,
-            "cohort_definition_manifest": {
-                "name": os.path.basename(definitions_path),
-                "sha256": _sha256_file(definitions_path),
+        definitions.to_csv(definitions_path_out, sep="\t", index=False)
+        definition_ids = set(definitions["cohort_definition_id"].astype(int))
+        _validate_omop_cohort_file(cohort_path, definition_ids)
+        provenance = {
+            "generator": "GetPheno",
+            "getpheno_version": __version__,
+            "generated_at_utc": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "source_files": {
+                "phenotype_request": {
+                    "name": os.path.basename(phenotype_request),
+                    "sha256": _sha256_file(phenotype_request),
+                } if phenotype_request and os.path.exists(phenotype_request) else None,
+                "cohort_definition_manifest": {
+                    "name": os.path.basename(definitions_path),
+                    "sha256": _sha256_file(definitions_path),
+                },
+                "person_map": {
+                    "name": os.path.basename(person_map_path),
+                    "sha256": _sha256_file(person_map_path),
+                },
             },
-            "person_map": {
-                "name": os.path.basename(person_map_path),
-                "sha256": _sha256_file(person_map_path),
+            "outputs": {
+                "COHORT.tsv": _sha256_file(cohort_path),
+                "COHORT_DEFINITION.tsv": _sha256_file(definitions_path_out),
             },
-        },
-        "outputs": {
-            "COHORT.tsv": _sha256_file(cohort_path),
-            "COHORT_DEFINITION.tsv": _sha256_file(definitions_path_out),
-        },
-    }
-    with open(provenance_path, "w", encoding="utf-8") as handle:
-        json.dump(provenance, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    return [cohort_path, definitions_path_out, provenance_path]
+        }
+        with open(provenance_path, "w", encoding="utf-8") as handle:
+            json.dump(provenance, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        staged_paths = [cohort_path, definitions_path_out, provenance_path]
+        backups = {}
+        published = []
+        try:
+            for destination in output_paths:
+                if os.path.exists(destination):
+                    backup = os.path.join(staging, os.path.basename(destination) + ".previous")
+                    shutil.copy2(destination, backup)
+                    backups[destination] = backup
+            for source, destination in zip(staged_paths, output_paths):
+                os.replace(source, destination)
+                published.append(destination)
+        except Exception:
+            for destination in reversed(published):
+                if destination in backups:
+                    os.replace(backups[destination], destination)
+                else:
+                    os.remove(destination)
+            raise
+    return output_paths
+
 
 def _to_datetime_series(s: pd.Series, *, fmt: str, dayfirst: bool) -> pd.Series:
     """
@@ -2672,7 +2843,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
          deathdatecol="", MinMaxAgeDeath="0,0", keepAlive=False, onlyDead=False,
          write_omop_cohort=False, omop_person_map="", omop_person_map_iid_col="",
          omop_person_id_col="person_id", omop_cohort_definitions="",
-         omop_output_dir="", omopsep="\t", register_col=""):
+         omop_output_dir="", omopsep="\t", register_col="", opr_options=None):
     
     ## Add global variables
     global min_Age
@@ -2693,6 +2864,9 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
     global ATC_Requested
 
     ATC_Requested = "NotSet"
+    opr_options = {"file": "", "code_col": "opr", "date_col": "", "date_out_col": "", "iid_col": "",
+                   "sep": "", "date_cols": [], "include": [], "exclude": [],
+                   "requested": False, **(opr_options or {})}
     ipsych_options = normalize_ipsych_comparison_options(ipsych_options)
     phenotype_request_path = pheno_request
     
@@ -2900,6 +3074,19 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             if("--sexcol" in defaultargs and config.has_option(cluster_run, "sexcol")):
                 sexcol = config.get(cluster_run, "sexcol")
                 argstring = argstring+(f"--sexcol: {sexcol} (Set by loading config file)\n")
+            for flag, key, ini_key in (
+                ("--opr", "file", "opr_file"), ("--oprcol", "code_col", "opr_diag_col"),
+                ("--oprdatecol", "date_col", "opr_date_col"), ("--opriidcol", "iid_col", "opr_iid_col"),
+                ("--oprdatecol", "date_col", "opr_date_in_col"),
+                ("--oprdateoutcol", "date_out_col", "opr_date_out_col"),
+                ("--oprsep", "sep", "opr_sep"), ("--oprDates", "date_cols", "opr_cols_to_read_as_date"),
+                ("--oprFilter", "include", "opr_filters"), ("--oprExclude", "exclude", "opr_exclusions"),
+            ):
+                if flag in defaultargs and config.has_option(cluster_run, ini_key):
+                    if ini_key == 'opr_date_in_col' and not config.get(cluster_run, ini_key).strip():
+                        continue  # Keep a populated legacy opr_date_col setting.
+                    opr_options[key] = config.get(cluster_run, ini_key)
+                    argstring += f"{flag}: {opr_options[key]} (Set by loading config file)\n"
             if("--atc" in defaultargs and config.has_option(cluster_run, "atc_file")):
                 atc_file = config.get(cluster_run, "atc_file")
                 argstring = argstring+(f"--atc: {atc_file} (Set by loading config file)\n")
@@ -3173,6 +3360,15 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             if not name or name not in item["columns"]:
                 raise ValueError(f"Register column '{name}' missing in {item['path']}; use --registercol")
     register_col = _lpr_schema_value(lpr_schema, "register_col", register_col)
+    # Resolve explicitly selected filter columns after standard-input renaming.
+    opr_options['fallback_columns'] = {'source': 'register', 'c_pattype': 'pattype',
+                                        'c_indm': 'admissiontype', 'diag_source': 'source'}
+    for option, mapping in lpr_schema['columns'].items():
+        canonical = {'ctype_col': 'diagtype', 'register_col': 'register',
+                     'diagnostic_col': 'diagnosis'}.get(option, mapping['canonical'])
+        for source in mapping['sources']:
+            if source:
+                opr_options['fallback_columns'][source] = canonical
     if register_required:
         logger.info("[iPSYCH comparison] Register/source mapping: %s -> %s",
                     lpr_schema["columns"]["register_col"]["sources"], "register")
@@ -3504,6 +3700,31 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
             atc_file = ""
             ATC_Requested = "None"
 
+        opr_requests = [in_pheno_codes, lifetime_exclusions, oneYearPrior_exclusions,
+                        post_exclusions, covariates]
+        for path in (lifetime_exclusions_file, oneYearPrior_exclusions_file, post_exclusions_file):
+            for request_path in _split_input_paths(path):
+                with open(request_path, "r", encoding="utf-8") as handle:
+                    opr_requests.extend(handle.readlines())
+        opr_options["codes"] = []
+        opr_options["remove_point"] = _as_bool(remove_point_in_diag_request)
+        for token in _iter_code_tokens(opr_requests):
+            if token.upper().startswith("OPR:"):
+                for code in expand_ranges([token.upper()]):
+                    if opr_options["remove_point"]:
+                        code = code.replace(".", "")
+                    opr_options["codes"].append(code)
+        opr_options["requested"] = bool(opr_options["codes"])
+        opr_options['filters'] = normalize_opr_filters(opr_options['include'], opr_options['exclude'])
+        if opr_options["requested"] and opr_options["file"]:
+            configure_opr_input(opr_options, iidcol, input_date_in_name, fsep, input_date_out_name)
+        elif opr_options["requested"]:
+            logger.info("[main] OPR codes requested without --opr; searching standard -f/-f2 inputs")
+        else:
+            if opr_options["file"]:
+                logger.info("[main] No OPR codes requested; OPR inputs will not be opened")
+            opr_options["file"] = ""
+
         if selectIIDs != "" and os.path.exists(selectIIDs):
             iids = load_iid_list_file(selectIIDs, iidcol, None, "selectIIDs")
             # filter df3
@@ -3643,7 +3864,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                                         exclCHBcontrols=exclCHBcontrols, iidstatus_col=iidstatus_col, iidstatusdate=iidstatusdate, addition_information_file=addition_information_file, sexcol=sexcol, 
                                         input_date_in_name=input_date_in_name, input_date_out_name=input_date_out_name, append=False, icdprefix=icdprefix, noLeadingICD=noLeadingICD, 
                                         lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions, post_exclusions=post_exclusions, covariates=covariates, lowMem=lowMem, main_pheno_name=main_pheno_name,
-                                        ipsych_options=ipsych_options)
+                                        ipsych_options=ipsych_options, opr_options=opr_options)
             elif lowMem and not verylowMem:
                 first_write = True  # Control whether to overwrite or append to the file
                 iids = df3[iidcol].unique()  # Get unique IIDs from df3
@@ -3733,8 +3954,8 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                     append=append_flag, icdprefix=icdprefix, noLeadingICD=noLeadingICD,
                     lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions,
                     post_exclusions=post_exclusions, covariates=covariates, lowMem=lowMem, main_pheno_name=main_pheno_name,
-                    output_columns=planned_output_columns, ipsych_options=ipsych_options
-                )
+                    output_columns=planned_output_columns, ipsych_options=ipsych_options,
+                    opr_options=opr_options)
                 #End new 09.12.2025
                 # Old 01.10.2025
                 # if len(df1) > 0:
@@ -3858,8 +4079,8 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                         append=append_flag, icdprefix=icdprefix, noLeadingICD=noLeadingICD,
                         lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions,
                         post_exclusions=post_exclusions, covariates=covariates, lowMem=lowMem, main_pheno_name=main_pheno_name,
-                        output_columns=planned_output_columns, ipsych_options=ipsych_options
-                    )
+                        output_columns=planned_output_columns, ipsych_options=ipsych_options,
+                        opr_options=opr_options)
                     first_write = False
                 # Verify all IIDs were processed
                 missing_iids = set(iids_list) - processed_iids
@@ -4017,7 +4238,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                                          exclCHBcontrols=exclCHBcontrols, iidstatus_col=iidstatus_col, iidstatusdate=iidstatusdate, addition_information_file=addition_information_file, sexcol=sexcol, 
                                          input_date_in_name=input_date_in_name, input_date_out_name=input_date_out_name, append=append_flag, icdprefix=icdprefix, noLeadingICD=noLeadingICD,
                                          lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions, post_exclusions=post_exclusions, covariates=covariates, lowMem=lowMem, main_pheno_name=main_pheno_name,
-                                         output_columns=planned_output_columns, ipsych_options=ipsych_options)
+                                         output_columns=planned_output_columns, ipsych_options=ipsych_options, opr_options=opr_options)
                 first_write = False
             # Verify all IIDs were processed
             missing_iids = set(iids_list) - processed_iids
@@ -4083,7 +4304,7 @@ def main(lpr_file, pheno_request, stam_file, addition_information_file, use_pred
                                          exclCHBcontrols=exclCHBcontrols, iidstatus_col=iidstatus_col, iidstatusdate=iidstatusdate, addition_information_file=addition_information_file, sexcol=sexcol, 
                                          input_date_in_name=input_date_in_name, input_date_out_name=input_date_out_name, append=False, icdprefix=icdprefix, noLeadingICD=noLeadingICD,
                                         lifetime_exclusions=lifetime_exclusions, oneYearPrior_exclusions=oneYearPrior_exclusions, post_exclusions=post_exclusions, covariates=covariates, lowMem=lowMem, main_pheno_name=main_pheno_name,
-                                        ipsych_options=ipsych_options)
+                                        ipsych_options=ipsych_options, opr_options=opr_options)
 
         
     omop_output_files = []
@@ -4315,17 +4536,14 @@ def select_by_iid_and_diag_optimized(
     # Group requested codes by explicit ICD system. A prefixed request such as
     # ICD10:DF30 must also find legacy/indexed DF30 rows, but must not match a
     # row explicitly labelled as another ICD system.
-    exact_by_system, prefixes_by_system = {}, {}
+    namespace_pattern = r"^(ICD\d{1,2}(?:-CM)?|OPR(?=:)|ATC(?=:))[-:]?(.*)$"
+    codes_by_system = {}
     if diags_list is not None:
         for d in map(str, diags_list):
-            d = d.strip()
-            is_prefix = prefix_all or d.endswith("*")
-            if d.endswith("*"):
-                d = d[:-1]
-            match = re.match(r"^(ICD\d{1,2})[-:]?(.*)$", d)
+            d = d.strip().upper()
+            match = re.match(namespace_pattern, d)
             system, code = (match.group(1), match.group(2)) if match else (None, d)
-            target = prefixes_by_system if is_prefix else exact_by_system
-            target.setdefault(system, set()).add(code)
+            codes_by_system.setdefault(system, set()).add(code)
 
     # Ensure required columns are always requested from the store
     need = {iidcol, diagcol}
@@ -4382,20 +4600,17 @@ def select_by_iid_and_diag_optimized(
             if diags_list is None:
                 diag_mask = pd.Series(True, index=chunk.index)
             else:
-                s = chunk[diagcol].astype("string").str.strip()
-                s_system = s.str.extract(r"^(ICD\d{1,2})[-:]?", expand=False)
-                s_noprefix = s.str.replace(r"^(ICD\d{1,2}[-:]?)", "", regex=True)
+                s = chunk[diagcol].astype("string").str.strip().str.upper()
+                parts = s.str.extract(namespace_pattern)
+                s_system = parts[0]
+                s_noprefix = parts[1].fillna(s)
                 dmask = pd.Series(False, index=chunk.index)
-                for system, codes in exact_by_system.items():
+                for system, codes in codes_by_system.items():
                     system_mask = pd.Series(True, index=chunk.index) if system is None else (
-                        s_system.isna() | s_system.eq(system)
+                        (s_system.isna() & ~s.str.contains(":", regex=False, na=False)) | s_system.eq(system)
                     )
-                    dmask |= system_mask & s_noprefix.isin(codes)
-                for system, prefixes in prefixes_by_system.items():
-                    system_mask = pd.Series(True, index=chunk.index) if system is None else (
-                        s_system.isna() | s_system.eq(system)
-                    )
-                    dmask |= system_mask & s_noprefix.str.startswith(tuple(prefixes), na=False)
+                    values = s_noprefix.str.upper() if system == "OPR" else s_noprefix
+                    dmask |= system_mask & _code_match_mask(values, codes, exact=not prefix_all)
                 diag_mask = dmask
                 # s = chunk[diagcol].astype("string").str.strip()
                 # dmask = pd.Series(False, index=chunk.index)
@@ -4458,9 +4673,8 @@ def get_h5_cases(
     Behavior:
     - If iids is empty, include all IDs (no iid filter).
     - If diags is empty, include all diagnoses (no diag filter).
-    - If directmapping=False: all diags are treated as prefixes (strip '*').
-    - If directmapping=True: diagnostics without '*' are exact matches;
-      those with '*' are treated as prefixes.
+    - If directmapping=False: plain codes are prefixes; explicit * patterns match whole codes.
+    - If directmapping=True: plain codes are exact; * patterns remain active anywhere.
     Parameters
     ----------
     h5file : str
@@ -4625,9 +4839,9 @@ def generate_test_dataset(odir):
     # Save the DataFrame to a CSV file
     test_mdd_pheno_df.to_csv("./sample_pheno_request.txt", index=False)
 
-def load_mapping_rows(file_path, iidcol, target_iids, sep="\t", suffix_search=False, chunksize=100000, verbose=False):
+def load_mapping_rows(file_path, iidcol, target_iids, sep="\t", suffix_search=False, chunksize=100000, verbose=False, normalize_iids=True):
     """
-    Stream the file and return a list of 1-based line numbers to keep (including header).
+    Stream the file and return 1-based CSV/TSV record numbers (including header).
     If no matches found -> return [].
     If target_iids is None or empty -> return None (meaning: don't prefilter).
     """
@@ -4636,19 +4850,28 @@ def load_mapping_rows(file_path, iidcol, target_iids, sep="\t", suffix_search=Fa
             logger.info(f"[load_mapping_rows] target_iids is None -> no prefilter for {file_path}")
         return None
 
-    target_set = set(str(x) for x in target_iids)
-    matching_rows = []  # will contain 1-based line numbers (header is line 1)
+    targets = pd.Series(list(target_iids), dtype="string")
+    if normalize_iids:
+        targets = normalize_iid_series(targets, target="str")
+    target_set = set(targets.dropna().astype(str))
+    if not target_set:
+        return None
+    matching_rows = []
     header_lines = 1
     processed_rows = 0
 
     try:
         # stream only the IID column to save memory
-        for chunk in pd.read_csv(file_path, sep=sep, usecols=[iidcol], dtype=str, chunksize=chunksize, iterator=True):
+        read_options = {"sep": sep, "usecols": [iidcol], "dtype": str, "chunksize": chunksize}
+        if _separator_requires_python_engine(sep):
+            read_options["engine"] = "python"
+        for chunk in pd.read_csv(file_path, **read_options):
             # compute mask
+            values = normalize_iid_series(chunk[iidcol], target="str") if normalize_iids else chunk[iidcol].astype("string")
             if suffix_search:
-                mask = chunk[iidcol].astype(str).str.endswith(tuple(target_set))
+                mask = values.str.endswith(tuple(target_set), na=False)
             else:
-                mask = chunk[iidcol].astype(str).isin(target_set)
+                mask = values.isin(target_set)
             if mask.any():
                 idxs = np.where(mask.values)[0]
                 for idx in idxs:
@@ -4657,33 +4880,24 @@ def load_mapping_rows(file_path, iidcol, target_iids, sep="\t", suffix_search=Fa
                     matching_rows.append(ln)
             processed_rows += len(chunk)
     except Exception as e:
-        logger.warning(f"[load_mapping_rows] Error streaming file {file_path}: {e}. Falling back to full read.")
-        try:
-            df = pd.read_csv(file_path, sep=sep, dtype=str, usecols=[iidcol])
-            if suffix_search:
-                mask = df[iidcol].astype(str).str.endswith(tuple(target_set))
-            else:
-                mask = df[iidcol].astype(str).isin(target_set)
-            matching_rows = [1] + (mask[mask].index + 2).tolist()  # +2: header + 1-based
-        except Exception as e2:
-            logger.error(f"[load_mapping_rows] Full-read fallback failed for {file_path}: {e2}")
-            return []
+        logger.error(f"[load_mapping_rows] Failed to read {file_path}: {e}")
+        raise
 
     if len(matching_rows) == 0:
         if verbose:
             logger.info(f"[load_mapping_rows] No matches found in {file_path} for {len(target_set)} target_iids")
         return []
 
-    # Always include header line 1 for awk to produce a valid CSV
+    # Always include the header record.
     result = [1] + sorted(set(matching_rows))
     if verbose:
         logger.info(f"[load_mapping_rows] Found {len(result)-1} matching rows. First few: {result[:10]}")
     return result
 
 
-def build_temp_file(file_path, row_indices, temp_file="filtered_temp.csv", index_file=None, verbose=False):
+def build_temp_file(file_path, row_indices, temp_file="filtered_temp.csv", index_file=None, verbose=False, sep=None):
     """
-    Create a temp file with only the requested line numbers using awk.
+    Copy complete CSV/TSV records, preserving quoted newlines and original text.
     - If row_indices is None -> do nothing (use full original file)
     - If row_indices is [] -> no rows to keep (caller should handle)
     - Returns path to temp_file (or original file_path if no filtering applied)
@@ -4698,30 +4912,44 @@ def build_temp_file(file_path, row_indices, temp_file="filtered_temp.csv", index
             logger.info("[build_temp_file] empty row_indices -> return empty indicator")
         return ""  # signal: no matches
 
-    if index_file is None:
-        index_file = f"{uuid.uuid4().hex[:8]}.row_indices.txt"
-
+    if os.path.abspath(file_path) == os.path.abspath(temp_file):
+        raise ValueError("Filtered output must differ from its input file")
+    wanted = set(int(row) for row in row_indices)
     try:
-        with open(index_file, "w") as fh:
-            for r in row_indices:
-                fh.write(str(int(r)) + "\n")
+        with open(file_path, encoding="utf-8", newline="") as source:
+            delimiter = sep
+            if delimiter is None or len(delimiter) != 1:
+                header = source.readline()
+                source.seek(0)
+                try:
+                    delimiter = csv.Sniffer().sniff(header, delimiters=",\t;| ").delimiter
+                except csv.Error:
+                    delimiter = "\t"
+            record_lines = []
 
-        awk_command = f"awk 'NR==FNR{{lines[$1]; next}} FNR in lines' {index_file} {file_path} > {temp_file}"
-        if verbose:
-            logger.info(f"[build_temp_file] Running: {awk_command}")
-        subprocess.run(awk_command, shell=True, check=True)
-        if not verbose:
-            try:
-                os.remove(index_file)
-            except Exception:
-                pass
+            def lines():
+                for line in source:
+                    record_lines.append(line)
+                    yield line
+
+            with open(temp_file, "w", encoding="utf-8", newline="") as target:
+                record_number = 0
+                for record in csv.reader(lines(), delimiter=delimiter, strict=True):
+                    if any(line.strip() for line in record_lines):
+                        record_number += 1
+                        if record_number in wanted:
+                            target.writelines(record_lines)
+                            wanted.remove(record_number)
+                    record_lines.clear()
+                    if not wanted:
+                        break
+            if wanted:
+                raise ValueError(f"Input ended before requested records: {sorted(wanted)[:5]}")
         return temp_file
-    except subprocess.CalledProcessError as e:
-        logger.error(f"[build_temp_file] awk failed: {e}")
-        return ""
-    except Exception as e:
-        logger.error(f"[build_temp_file] unexpected error: {e}")
-        return ""
+    except Exception:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        raise
 
 
 def batch_load_lprfile(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnummer,
@@ -4765,53 +4993,51 @@ def batch_load_lprfile(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnummer
     selected_indexes = []
     selected_paths = []
     temporary_paths = []
-    for file_index, source_path in enumerate(lpr_schema["paths"]):
-        source_column = lpr_schema["columns"][filter_option]["sources"][file_index]
-        if not source_column:
-            continue
-        if filter_on_diagcol and advanced_detected:
-            rows_to_keep = None
-            if verbose:
-                logger.info("[batch_load_lprfile] advanced diagnostics detected -> skipping diagnosis prefilter")
-        elif targets is None or len(targets) == 0:
-            rows_to_keep = None
-        else:
-            rows_to_keep = load_mapping_rows(
-                source_path, source_column, targets, sep=sep,
-                suffix_search=False, verbose=verbose,
-            )
-        if isinstance(rows_to_keep, list) and not rows_to_keep:
-            continue
-        selected_path = source_path
-        if isinstance(rows_to_keep, list):
-            selected_path = f"{uuid.uuid4().hex[:8]}.filtered_temp.csv"
-            selected_path = build_temp_file(
-                source_path, rows_to_keep, temp_file=selected_path, verbose=verbose
-            )
-            if not selected_path:
-                continue
-            temporary_paths.append(selected_path)
-        selected_indexes.append(file_index)
-        selected_paths.append(selected_path)
-
-    if not selected_paths:
-        if verbose:
-            logger.info(f"[batch_load_lprfile] No rows to keep for batch {batch_num}")
-        return pd.DataFrame()
-
-    filtered_schema = subset_lpr_input_schema(
-        lpr_schema, selected_indexes, selected_paths
-    )
-    secondary_paths = _split_input_paths(lpr2nd_file)
-    if secondary_paths:
-        if len(secondary_paths) != len(lpr_schema["paths"]):
-            raise ValueError("The number of --f2 files must match the number of -f files")
-        filtered_secondary = ",".join(secondary_paths[index] for index in selected_indexes)
-    else:
-        filtered_secondary = ""
-
-    # Delegate to the main lpr parser/merger
     try:
+        for file_index, source_path in enumerate(lpr_schema["paths"]):
+            source_column = lpr_schema["columns"][filter_option]["sources"][file_index]
+            if not source_column:
+                continue
+            if filter_on_diagcol and advanced_detected:
+                rows_to_keep = None
+                if verbose:
+                    logger.info("[batch_load_lprfile] advanced diagnostics detected -> skipping diagnosis prefilter")
+            elif targets is None or len(targets) == 0:
+                rows_to_keep = None
+            else:
+                rows_to_keep = load_mapping_rows(
+                    source_path, source_column, targets, sep=sep,
+                    suffix_search=False, verbose=verbose, normalize_iids=not filter_on_diagcol,
+                )
+            if isinstance(rows_to_keep, list) and not rows_to_keep:
+                continue
+            selected_path = source_path
+            if isinstance(rows_to_keep, list):
+                selected_path = f"{uuid.uuid4().hex[:8]}.filtered_temp.csv"
+                temporary_paths.append(selected_path)
+                selected_path = build_temp_file(
+                    source_path, rows_to_keep, temp_file=selected_path, verbose=verbose, sep=sep
+                )
+            selected_indexes.append(file_index)
+            selected_paths.append(selected_path)
+
+        if not selected_paths:
+            if verbose:
+                logger.info(f"[batch_load_lprfile] No rows to keep for batch {batch_num}")
+            return pd.DataFrame()
+
+        filtered_schema = subset_lpr_input_schema(
+            lpr_schema, selected_indexes, selected_paths
+        )
+        secondary_paths = _split_input_paths(lpr2nd_file)
+        if secondary_paths:
+            if len(secondary_paths) != len(lpr_schema["paths"]):
+                raise ValueError("The number of --f2 files must match the number of -f files")
+            filtered_secondary = ",".join(secondary_paths[index] for index in selected_indexes)
+        else:
+            filtered_secondary = ""
+
+        # Delegate to the main lpr parser/merger
         df_new = process_lpr_data(
             lpr_file=",".join(selected_paths),
             lpr2nd_file=filtered_secondary,
@@ -4903,21 +5129,21 @@ def batch_load_lprfile_old(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnu
     except Exception:
         advanced_detected = False
     if filter_on_diagcol and not advanced_detected:
-        df1_rows_to_keep = load_mapping_rows(file_path=lprfile, iidcol=diagnostic_col, target_iids=diags, sep=sep, suffix_search=False)
+        df1_rows_to_keep = load_mapping_rows(file_path=lprfile, iidcol=diagnostic_col, target_iids=diags, sep=sep, suffix_search=False, normalize_iids=False)
     else:
         if filter_on_diagcol and advanced_detected:
             logger.info("[batch_load_lprfile] Advanced phenotype detected; skipping diag-based prefilter and loading full batch to allow advanced logic to run.")
         df1_rows_to_keep = load_mapping_rows(file_path=lprfile, iidcol=iidcol, target_iids=iid_batch, sep=sep, suffix_search=False)
     temp_file = str(uuid.uuid4())[:4]+".filtered_temp.csv"
-    build_temp_file(lprfile, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
+    build_temp_file(lprfile, df1_rows_to_keep, temp_file=temp_file, verbose=verbose, sep=sep)
     lprfile = temp_file
     ### END NEW 24.11.2025
     # if filter_on_diagcol:
-    #     df1_rows_to_keep = load_mapping_rows(file_path=lprfile, iidcol=diagnostic_col, target_iids=diags, sep=sep, suffix_search=False) #load_mapping_rows(lprfile, diagnostic_col, diags, sep)
+    #     df1_rows_to_keep = load_mapping_rows(file_path=lprfile, iidcol=diagnostic_col, target_iids=diags, sep=sep, suffix_search=False, normalize_iids=False) #load_mapping_rows(lprfile, diagnostic_col, diags, sep)
     # else:
     #     df1_rows_to_keep = load_mapping_rows(file_path=lprfile, iidcol=iidcol, target_iids=iid_batch, sep=sep, suffix_search=False) #load_mapping_rows(lprfile, iidcol, iid_batch, sep)
     # temp_file = str(uuid.uuid4())[:4]+".filtered_temp.csv"
-    # build_temp_file(lprfile, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
+    # build_temp_file(lprfile, df1_rows_to_keep, temp_file=temp_file, verbose=verbose, sep=sep)
     # lprfile = temp_file
     del df1_rows_to_keep
 
@@ -4927,7 +5153,7 @@ def batch_load_lprfile_old(df, lprfile, lpr_recnummer, lpr2nd_file, lpr2nd_recnu
         logger.info(lpr_recnummer_batch)
         df1_rows_to_keep = load_mapping_rows(file_path=lpr2nd_file, iidcol=lpr2nd_recnummer, target_iids=lpr_recnummer_batch, sep=sep, suffix_search=False) #load_mapping_rows(lpr2nd_file, lpr2nd_recnummer, lpr_recnummer_batch, sep)
         temp_file = str(uuid.uuid4())[:4]+".filtered2nd_temp.csv"
-        build_temp_file(lpr2nd_file, df1_rows_to_keep, temp_file=temp_file, verbose=verbose)
+        build_temp_file(lpr2nd_file, df1_rows_to_keep, temp_file=temp_file, verbose=verbose, sep=sep)
         lpr2nd_file = temp_file
         del df1_rows_to_keep
     # Delegate all file loading and merging to process_lpr_data.
@@ -5194,7 +5420,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                                  BuildEntryExitDates, lifetime_exclusions_file, post_exclusions_file, oneYearPrior_exclusions_file, outfile, write_Plink2_format, 
                                  write_fastGWA_format, write_pickle, n_stam_iids, exclCHBcontrols, iidstatus_col, iidstatusdate, addition_information_file, sexcol, input_date_in_name, 
                                  input_date_out_name, append, df4, icdprefix, noLeadingICD, lifetime_exclusions, oneYearPrior_exclusions, post_exclusions, covariates, lowMem, main_pheno_name, output_columns=None,
-                                 ipsych_options=None):
+                                 ipsych_options=None, opr_options=None):
     global extra_cols_to_keep
     df3_cols = []
     df4_cols = []
@@ -5300,6 +5526,19 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
             logger.info(f"[process_pheno_and_exclusions] ERROR loading general_exclusions ({general_exclusions}). General exclusion filtering cannot be skipped safely. Error message: {e}")
             raise
 
+    opr_options = opr_options or {}
+    opr_df = load_opr_records(opr_options, batch_iid_set, iidcol,
+                              input_date_in_name, input_date_out_name, ipsych_options)
+    if opr_options.get("requested"):
+        code_col = diagnostic_col if diagnostic_col in df1.columns else "diagnosis"
+        if code_col in df1.columns:
+            procedure_mask = _code_match_mask(df1[code_col], opr_options['codes'], exact_match)
+            if not opr_options.get('file'):
+                opr_df = filter_opr_records(df1.loc[procedure_mask], opr_options, fallback=True)
+                opr_df['_opr_event'] = True
+            # OPR evidence follows its own explicit policy in either input route.
+            df1 = df1.loc[~procedure_mask].copy()
+
     cols_to_keep = [[iidcol, "diagnosis", "diagnoses", "in_dates", "out_dates", "first_dx", "last_dx", "n_diags", "n_unique_in_days"] + extra_cols_to_keep ]
     # Flatten the list if needed (in case cols_to_keep is nested)
     if isinstance(cols_to_keep, list) and any(isinstance(i, list) for i in cols_to_keep):
@@ -5312,8 +5551,9 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         # use only those IIDs that are given in df3 and df1. 
         df3_N_before = str(df3[iidcol].nunique())
         df1_N_before = str(df1[iidcol].nunique())
-        if df3_N_before > 0:
-            df3 = df3[df3[iidcol].isin(df1[iidcol])]
+        if int(df3_N_before) > 0:
+            event_iids = set(df1[iidcol]) | set(opr_df[iidcol])
+            df3 = df3[df3[iidcol].isin(event_iids)]
             df1 = df1[df1[iidcol].isin(df3[iidcol])]
             logger.info(f"[process_pheno_and_exclusions] After Restraining df1 {str(df1[iidcol].nunique())}({df1_N_before}) and df3 {str(df3[iidcol].nunique())}({df3_N_before}); now(before)")
         else:
@@ -5366,6 +5606,10 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
                 logger.info(f"[process_pheno_and_exclusions] Excluded {len_before-len_after} Diagnoses from the main input file due to ctype_inclusions {ctype_incl}. This does not reflect case/control diagnoses; This is only a general information.")
         else:
             logger.info("[process_pheno_and_exclusions] WARNING: You selected to include only certain c_types but you are not running this method on a CHB/DBDS Server!")
+    if not opr_df.empty:
+        opr_df = enforce_iid_universe(opr_df, iidcol, set(df3[iidcol]), "OPR after cohort filters")
+        df1 = pd.concat([df1, opr_df], ignore_index=True, sort=False)
+
     if (Filter_YoB != ""):
         if (cluster_run in DK_clusters):
             Filter_YoB = Filter_YoB
@@ -5388,7 +5632,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
             del iids_to_keep
         else:
             logger.info("[process_pheno_and_exclusions] WARNING: Selected filter is not implemented yet!")
-    if (len(df1) == 0 and not lowMem):
+    if (len(df1) == 0 and not lowMem and not opr_options.get("requested")):
         logger.info("[process_pheno_and_exclusions] ERROR: No IIDs left after initial Filtering. Consider using different Filters. Exiting")
         logger.info(f"[process_pheno_and_exclusions] df1.head(5): {df1.head(5)}; df3.head(5): {df3.head(5)} ")
         if not verbose:
@@ -5401,7 +5645,7 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
     if general_exclusions != "":
         logger.info(f"[process_pheno_and_exclusions] General exclusion filtering already applied to df3, df1, and df4 using {general_exclusions}.")
     gc.collect()
-    if (len(df1) == 0 and not lowMem):
+    if (len(df1) == 0 and not lowMem and not opr_options.get("requested")):
         logger.info("[process_pheno_and_exclusions] Error: No IIDs left after general exclusion Filtering. Consider using different Filters. Exiting")
         exit()
     logger.info(f"[process_pheno_and_exclusions] Original in_pheno_codes: {in_pheno_codes}")
@@ -5479,7 +5723,8 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         if not verbose:
             print(f"[process_pheno_and_exclusions] Building CaseControl list regarding {InclusionReason}")
         values_to_match = ""
-        values_to_match = set(str(value) for value in in_pheno_codes.loc[in_pheno_codes['Disorder'] == InclusionReason, "Disorder Codes"].iloc[0])
+        requested_codes = in_pheno_codes.loc[in_pheno_codes['Disorder'] == InclusionReason, "Disorder Codes"].iloc[0]
+        values_to_match = {requested_codes} if isinstance(requested_codes, str) else set(map(str, requested_codes))
         phenotype_extra_cols = extra_columns_for_codes(values_to_match, cluster_run)
         logger.info(f"[process_pheno_and_exclusions] values_to_match: {values_to_match}")
         if ipsych_options["presets"]:
@@ -5755,27 +6000,27 @@ def process_pheno_and_exclusions(MatchFI, df3, df1, iidcol, verbose, ctype_excl,
         if verbose:
             logger.info("[process_pheno_and_exclusions] Mem after building tmp_cases_df and tmp_controls_df; AND deleting df1:")
             usage()
-    if (lifetime_exclusions_file != "" and use_predefined_exdep_exclusions.empty):
+    if (lifetime_exclusions_file != "" and not use_predefined_exdep_exclusions):
             multi_exclusions = False
             if not verbose:
                 logger.info("[process_pheno_and_exclusions] Loading phenotypes for Lifetime exclusions.")
-            lifetime_exclusions , notneeded = load_phenotypes(pheno_request=lifetime_exclusions_file, pheno_name="LifeExcl", icdprefix=icdprefix, noLeadingICD=noLeadingICD, 
+            lifetime_exclusions, notneeded, _ = load_phenotypes(pheno_request=lifetime_exclusions_file, pheno_requestcol=pheno_requestcol, pheno_name="LifeExcl", icdprefix=icdprefix, noLeadingICD=noLeadingICD,
                                                   ICDCM=ICDCM, skip_icd_update=skip_icd_update, exact_match=exact_match, remove_point_in_diag_request=remove_point_in_diag_request)
             assert isinstance(lifetime_exclusions.iloc[0]["Disorder Codes"], list)
             del(notneeded)
-    if (oneYearPrior_exclusions_file != "" and use_predefined_exdep_exclusions.empty):
+    if (oneYearPrior_exclusions_file != "" and not use_predefined_exdep_exclusions):
             multi_exclusions = False
             if not verbose:
                 logger.info("[process_pheno_and_exclusions] Loading phenotypes for One Year Prior exclusions.")
-            oneYearPrior_exclusions , notneeded = load_phenotypes(pheno_request=oneYearPrior_exclusions_file, pheno_name="OneYearPriorExcl", icdprefix=icdprefix, noLeadingICD=noLeadingICD, 
+            oneYearPrior_exclusions, notneeded, _ = load_phenotypes(pheno_request=oneYearPrior_exclusions_file, pheno_requestcol=pheno_requestcol, pheno_name="OneYearPriorExcl", icdprefix=icdprefix, noLeadingICD=noLeadingICD,
                                                   ICDCM=ICDCM, skip_icd_update=skip_icd_update, exact_match=exact_match, remove_point_in_diag_request=remove_point_in_diag_request)
             assert isinstance(oneYearPrior_exclusions.iloc[0]["Disorder Codes"], list)
             del(notneeded)
-    if (post_exclusions_file != "" and use_predefined_exdep_exclusions.empty):
+    if (post_exclusions_file != "" and not use_predefined_exdep_exclusions):
             multi_exclusions = False
             if not verbose:
                 logger.info("[process_pheno_and_exclusions] Loading phenotypes for Post-Onset exclusions.")
-            post_exclusions , notneeded = load_phenotypes(pheno_request=post_exclusions_file, pheno_name="PostExcl", icdprefix=icdprefix, noLeadingICD=noLeadingICD, 
+            post_exclusions, notneeded, _ = load_phenotypes(pheno_request=post_exclusions_file, pheno_requestcol=pheno_requestcol, pheno_name="PostExcl", icdprefix=icdprefix, noLeadingICD=noLeadingICD,
                                                   ICDCM=ICDCM, skip_icd_update=skip_icd_update, exact_match=exact_match, remove_point_in_diag_request=remove_point_in_diag_request)
             assert isinstance(post_exclusions.iloc[0]["Disorder Codes"], list)
             del(notneeded)
@@ -6753,6 +6998,9 @@ def expand_ranges(code_list):
       - "36-38"                   -> ["36","37","38"]
       - "ICD10:T36-ICD10:T38"     -> ["ICD10:T36","ICD10:T37","ICD10:T38"]
       - "ICD10:T36-T38"           -> ["ICD10:T36","ICD10:T37","ICD10:T38"]
+      - "F20*-F22*"               -> ["F20*","F21*","F22*"]
+      - "ICD8:300.39-302.39"      -> ["ICD8:300.39","ICD8:301.39","ICD8:302.39"]
+      - "298.29-298.31"           -> ["298.29","298.30","298.31"]
     Accepts either a list/Series of tokens or a single comma-separated string.
     Falls back to returning the original token when it cannot be parsed.
     """
@@ -6768,14 +7016,15 @@ def expand_ranges(code_list):
             parts = s.split(":", 1)
             pref = parts[0].strip() + ":"
             rest = parts[1].strip()
-        # allow letters part that can be 1-2 letters (e.g., T or DF) and numeric (with optional decimal)
-        m = re.match(r"^([A-Za-z]{1,2})(\d+)(?:\.(\d+))?$", rest)
+        wildcard = rest.endswith("*")
+        if wildcard:
+            rest = rest[:-1]
+        # Preserve a shared decimal suffix while ranging over category numbers.
+        m = re.match(r"^([A-Za-z]+)?(\d+)(?:\.(\d+))?$", rest)
         if m:
-            letters, num, _ = m.groups()
-            return pref, letters, int(num)
-        m2 = re.match(r"^(\d+)$", rest)
-        if m2:
-            return pref, "", int(m2.group(1))
+            letters, num, decimal = m.groups()
+            width = len(num) if num.startswith("0") else 0
+            return pref, (letters or "").upper(), int(num), decimal or "", wildcard, width
         return None
 
     # Normalize input: if single string that contains commas, split on commas first
@@ -6804,39 +7053,48 @@ def expand_ranges(code_list):
             expanded.append(code)
             continue
 
-        # split only on the first dash to allow colons on the right side
-        left_raw, right_raw = map(str.strip, code.split("-", 1))
-
-        # Pure numeric range: "36-38"
-        if left_raw.isdigit() and right_raw.isdigit():
-            start, end = int(left_raw), int(right_raw)
-            if start <= end:
-                expanded.extend([str(i) for i in range(start, end + 1)])
-            else:
-                expanded.append(code)
-            continue
-
-        # Try parsing both sides structurally
-        lp = _parse_side(left_raw)
-        rp = _parse_side(right_raw)
+        # Namespace names such as ICD10-CM contain a dash of their own.
+        lp = rp = None
+        for separator in re.finditer("-", code):
+            lp = _parse_side(code[:separator.start()])
+            rp = _parse_side(code[separator.end():])
+            if lp and rp:
+                break
         if lp and rp:
-            lpref, lletters, lnum = lp
-            rpref, rletters, rnum = rp
+            lpref, lletters, lnum, ldecimal, lwildcard, lwidth = lp
+            rpref, rletters, rnum, rdecimal, rwildcard, rwidth = rp
+            if lpref and rpref and lpref.upper() != rpref.upper():
+                expanded.append(code)
+                continue
+            category_width = lwidth or rwidth
 
-            # If letter part matches (or both empty numeric), build range
-            if lletters == rletters:
+            # Within one category, step through decimals at the stated precision.
+            if (lletters == rletters and lnum == rnum and ldecimal and rdecimal
+                    and len(ldecimal) == len(rdecimal)):
+                start, end = int(ldecimal), int(rdecimal)
+                if start <= end:
+                    use_pref = lpref or rpref or ""
+                    suffix = "*" if lwildcard or rwildcard else ""
+                    width = len(ldecimal)
+                    expanded += [f"{use_pref}{lletters}{lnum:0{category_width}d}.{i:0{width}d}{suffix}"
+                                 for i in range(start, end + 1)]
+                else:
+                    expanded.append(code)
+                continue
+
+            # Only expand categories when their letter and decimal parts agree.
+            if lletters == rletters and ldecimal == rdecimal:
                 if lnum <= rnum:
                     use_pref = lpref or rpref or ""
-                    if lletters:
-                        expanded += [f"{use_pref}{lletters}{i}" for i in range(lnum, rnum + 1)]
-                    else:
-                        expanded += [f"{use_pref}{i}" for i in range(lnum, rnum + 1)]
+                    suffix = "*" if lwildcard or rwildcard else ""
+                    decimal = f".{ldecimal}" if ldecimal else ""
+                    expanded += [f"{use_pref}{lletters}{i:0{category_width}d}{decimal}{suffix}" for i in range(lnum, rnum + 1)]
                     continue
                 else:
                     expanded.append(code)
                     continue
             else:
-                # Different letter parts (rare) -> cannot safely expand -> keep original
+                # Different letter/decimal parts cannot be expanded unambiguously.
                 expanded.append(code)
                 continue
 
@@ -6879,15 +7137,8 @@ def parse_pheno_rules(rule_str, exact_match=False, skip_icd_update=False,
     
     logger.info(f"[parse_pheno_rules] trying to parse {rule_str}")
     
-    # Check if this is a simple wildcard pattern (e.g., "DF33*" or "ICD10:F32*")
-    if isinstance(rule_str, str) and rule_str.endswith('*') and ';' not in rule_str and '=' not in rule_str:
-        # Simple wildcard - return as-is in 'ranges'
-        rule['ranges'] = [rule_str]
-        logger.info(f"[parse_pheno_rules] Detected wildcard pattern: {rule_str}")
-        return rule
-    
     # Check for advanced rule format (main=, sub=, rule_out=)
-    if isinstance(rule_str, str) and ';' in rule_str:
+    if isinstance(rule_str, str) and '=' in rule_str:
         for part in rule_str.split(';'):
             if '=' not in part:
                 continue
@@ -6983,13 +7234,14 @@ def detect_advanced_cases(df, rule_dict, input_date_in_name, exact_match, diagco
         if candidate in df.columns:
             type_col = candidate
             break
+    opr_events = df.get('_opr_event', pd.Series(False, index=df.index)).fillna(False)
     if type_col is None:
         logger.warning('[detect_advanced_cases] Could not identify a column with diagnosis types (expected \"type\" or \"diagtype\"). Falling back to treating all rows as main diagnoses.')
         type_series = pd.Series(['A'] * len(df), index=df.index)
     else:
         type_series = df[type_col].fillna('')
-    main_df = df[type_series.isin(['A', 'G', 'C'])]
-    sub_df = df[type_series.isin(['+', 'B'])]
+    main_df = df[type_series.isin(['A', 'G', 'C']) | opr_events]
+    sub_df = df[type_series.isin(['+', 'B']) | opr_events]
     all_df = df.copy()
     ruleout_ids = set()
     ranges_ids = set()
@@ -7041,10 +7293,11 @@ def detect_advanced_cases(df, rule_dict, input_date_in_name, exact_match, diagco
             matched_frames.append(range_matches)
 
     # --- Merge all
+    matched_frames = [frame for frame in matched_frames if not frame.empty]
     if matched_frames:
         matched = pd.concat(matched_frames).drop_duplicates()
     else:
-        matched = pd.DataFrame(columns=['IID', input_date_in_name, 'diagnosis'])
+        matched = df.iloc[:0].copy()
 
     # --- Apply rule_out
     matched = matched[~matched[iidcol].isin(ruleout_ids)]
@@ -7132,32 +7385,13 @@ def advanced_map_cases_old(values_to_match, df1, exact_match, diagnostic_col, in
     return(tmp_result_df)
 
 def map_cases(values_to_match, exact_match, df1, diagcol, cols=None):
-        exact_set, prefixes = set(), []
         out = pd.DataFrame()
         try:
             if df1.empty:
                 logger.info("[map_cases] No diagnosis rows available for code matching.")
                 return out
             if values_to_match is not None and not df1.empty:
-                for d in map(str, values_to_match):
-                    d = d.strip()
-                    if not exact_match or d.endswith("*"):
-                        prefixes.append(d[:-1] if d.endswith("*") else d)
-                    else:
-                        exact_set.add(d)
-
-                # DIAG mask
-                s = df1[diagcol].astype("string").str.strip()
-
-                if values_to_match is None:
-                    diag_mask = pd.Series(True, index=df1.index)
-                else:
-                    dmask = pd.Series(False, index=df1.index)
-                    if exact_set:
-                        dmask |= s.isin(exact_set)
-                    if prefixes:
-                        dmask |= s.str.startswith(tuple(prefixes), na=False)
-                    diag_mask = dmask
+                diag_mask = _code_match_mask(df1[diagcol], values_to_match, exact_match)
                 if diag_mask.any():
                     out = (df1.loc[diag_mask, cols if cols is not None else df1.columns])
                 return out
@@ -8081,15 +8315,23 @@ def process_entry(entry, remove_leading, eM, mode, icdprefix, remove_point, ICDC
     """
     remove_leading = _as_bool(remove_leading)
     mode_normalized = str(mode).lower()
+    requires_sub = False
+    if isinstance(entry, str):
+        entry = entry.strip()
+        requires_sub = entry.lower().endswith('+sub')
+        if requires_sub:
+            entry = entry[:-4]
+        entry = entry.upper()
 
-    # Check if entry ends with wildcard and preserve it
-    has_wildcard = isinstance(entry, str) and entry.rstrip().endswith('*')
-    if has_wildcard:
+    # Preserve wildcard positions and avoid exact-code padding for glob patterns.
+    has_wildcard = isinstance(entry, str) and '*' in entry
+    has_trailing_wildcard = has_wildcard and entry.rstrip().endswith('*')
+    if has_trailing_wildcard:
         entry = entry.rstrip()[:-1].strip()  # Remove the wildcard temporarily
 
     def _restore_wildcard(value):
-        if has_wildcard and isinstance(value, str):
-            return value + "*"
+        if isinstance(value, str):
+            return value + ('*' if has_trailing_wildcard else '') + ('+sub' if requires_sub else '')
         return value
     
     # Handle non-string numeric entries
@@ -8100,6 +8342,11 @@ def process_entry(entry, remove_leading, eM, mode, icdprefix, remove_point, ICDC
                 return None
             return format_numeric(entry, mode)
         res = str(entry).replace('.', '') if remove_point else entry
+        return _restore_wildcard(res)
+    elif entry.upper().startswith("OPR:"):
+        res = "OPR:" + entry[4:].strip().upper()
+        if _as_bool(remove_point):
+            res = res.replace(".", "")
         return _restore_wildcard(res)
     # ATC entries are passed through (with minor adjustments in some modes)
     elif entry.startswith("ATC:"):
@@ -8365,14 +8612,16 @@ def dict_update_icd_coding(curr_codes: pd.DataFrame,
     def is_advanced(val):
         if not isinstance(val, str):
             return False
-        return any(k in val for k in ['main=', 'sub=', 'rule_out=', '-']) and '-CM' not in val
+        return (any(k in val for k in ['main=', 'sub=', 'rule_out='])
+                or ('-' in val and expand_ranges(val) != [val]))
     # Expect columns: 'Disorder', 'Disorder Codes' (string with commas OR list)
     all_updated_codes = []
     for _, row in curr_codes.iterrows():
         disorder = row['Disorder']
         raw = row['Disorder Codes']
         updated_list = []
-        if any(is_advanced(v) for v in raw):
+        raw_values = [raw] if isinstance(raw, str) else raw
+        if any(is_advanced(v) for v in raw_values):
             logger.info("[dict_update_icd_coding] Advanced phenotype logic detected. Skipping ICD mapping and using raw input.")
             #advanced_dict = parse_pheno_rules(raw)
             if isinstance(raw,list):
@@ -8412,7 +8661,7 @@ def dict_update_icd_coding(curr_codes: pd.DataFrame,
             updated = ""
             # main matches
             if advanced_dict.get('main'):
-                main_codes = set(advanced_dict['main'])
+                main_codes = list(dict.fromkeys(advanced_dict['main']))
                 # main_codes = update_icd_coding(
                 #     data=main_codes,
                 #     eM=exact_match,
@@ -8431,7 +8680,7 @@ def dict_update_icd_coding(curr_codes: pd.DataFrame,
                 updated_list.extend(main_codes)
             # sub matches
             if advanced_dict.get('sub'):
-                sub_codes = set(advanced_dict['sub'])
+                sub_codes = list(dict.fromkeys(advanced_dict['sub']))
                 # sub_codes = update_icd_coding(
                 #     data=sub_codes,
                 #     eM=exact_match,
@@ -8447,7 +8696,7 @@ def dict_update_icd_coding(curr_codes: pd.DataFrame,
                 updated_list.extend(sub_codes)
             # rule_out logic
             if advanced_dict.get('rule_out'):
-                ruleout_codes = set(advanced_dict['rule_out'])
+                ruleout_codes = list(dict.fromkeys(advanced_dict['rule_out']))
                 # ruleout_codes = update_icd_coding(
                 #     data=ruleout_codes,
                 #     eM=exact_match,
@@ -8462,7 +8711,7 @@ def dict_update_icd_coding(curr_codes: pd.DataFrame,
                 updated = updated + "rule_out=" + ','.join(ruleout_codes)
                 updated_list.extend(ruleout_codes)
             if advanced_dict.get('ranges'):
-                ranges_codes = set(advanced_dict['ranges'])
+                ranges_codes = list(dict.fromkeys(advanced_dict['ranges']))
                 if updated != "":
                     updated = updated + ";"
                 if advanced_dict.get('main') or advanced_dict.get('sub') or advanced_dict.get('rule_out'):
@@ -8601,12 +8850,10 @@ def load_phenotypes(pheno_request, pheno_requestcol, pheno_name="NoName",
     if not skip:
         # Determine presence of ATC codes
         global ATC_Requested 
-        atc_flags = [contains_atc_codes(v) for v in column_values]
-        if atc_flags and all(atc_flags):
-            ATC_Requested = "All"
-        elif any(atc_flags):
-            ATC_Requested = "Some"
-        elif ATC_Requested not in ["Some", "All"]:
+        atc_status = detect_ATC_status(in_pheno_codes)
+        if atc_status in ("All", "Some"):
+            ATC_Requested = atc_status
+        elif ATC_Requested not in ("Some", "All"):
             ATC_Requested = "None"
 
         logger.info(f"[load_phenotypes] in_pheno_codes before running dict_update_icd_coding: {in_pheno_codes}")
@@ -8690,7 +8937,7 @@ def Exclusion_interpreter(
     # Apply exclusion tables
     def _apply_table(df: pd.DataFrame, table: pd.DataFrame, etype: str, cols_to_drop: list):
         if table.empty or 'Disorder' not in table.columns:
-            return df
+            return df, cols_to_drop
         exclNumber = 1
         for disorder in table['Disorder']:
             if verbose:
@@ -8947,10 +9194,20 @@ def update_DxDates_multi_exclusion(
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Extracts a Phenotype from input files based on IIDs and diagnostic codes.\nThe best way to start, is to generate a test dataset: \'python get_phenotype.py -g \"\" -o ./ --BuildTestSet\' and then run \'python get_phenotype.py -g \"\" -o testrun.tsv --eM --ExDepExc --testRun\' ')
     parser.add_argument('--ini', required=False, default = '', help='Load an ini file that contains your data sources. Default: "%(default)s"')
+    parser.add_argument('--version', action='version', version=f'GetPheno {__version__}')
     parser.add_argument('-g', default='', help='Phenotype definition file; omit with --iPSYCHComparison to use all eight built-in presets')
     parser.add_argument('-o', required=True, help='Outfile name; dont forget to add the location, otherwise it will be saved in the local dir.') 
     parser.add_argument('-f', required=False, default='', help='One diagnosis/event file, or multiple comma-separated files. Files may use different column names; map them in the same order with --fcol, --iidcol, --din, --don, --DiagTypecol, --registercol, and --recnum. No default.')
     parser.add_argument('--f2', required=False, default='', help='Secondary diagnosis file. This is meant to be used if you have files with secondary diagnosis information as i.e. in Denmark. Here we would usually use the \'recnum\' to merge these entries with \'-f\'. These files also contain less information as the \'-f\' files. Should have at least \"recnum\", and \"diagnosis\" as columns. Names can be defined using --recnum2 and --f2col. The recnum column in the \'-f\' files can be specified using --recnum. Default: "%(default)s"') 
+    parser.add_argument('--opr', default='', help='Procedure input file(s), comma-separated. Loaded only when OPR: codes are requested; without it, search -f/-f2 inputs.')
+    parser.add_argument('--oprcol', default='opr', help='Procedure-code column: shared name or one name per --opr file. Codes may include or omit OPR:.')
+    parser.add_argument('--oprdatecol', '--oprdateincol', dest='oprdatecol', default='', help='Procedure in-date column: shared name or one per --opr file. Required column; blank inherits --din. --oprdatecol is retained as an alias.')
+    parser.add_argument('--oprdateoutcol', default='', help='Optional procedure out-date column: shared name or one per --opr file. Blank inherits --don when present; missing out dates use the in date.')
+    parser.add_argument('--opriidcol', default='', help='IID column: shared name or one per --opr file. Blank uses the resolved --iidcol.')
+    parser.add_argument('--oprsep', default='', help='Separator for --opr files. Blank uses --fsep.')
+    parser.add_argument('--oprDates', default=[], help='Additional comma-separated date columns in --opr files.')
+    parser.add_argument('--oprFilter', action='append', default=[], metavar='COLUMN=PATTERNS', help='Include OPR rows matching explicit column=value rules; repeat for multiple columns. Comma-separated alternatives, case-insensitive * wildcards. Default: no filtering.')
+    parser.add_argument('--oprExclude', action='append', default=[], metavar='COLUMN=PATTERNS', help='Exclude OPR rows matching explicit column=value rules; repeat as needed. Default: no exclusions.')
     parser.add_argument('--atc', required=False, default='', help='PRescription information file. Will be handeld simillar to -f but needs additional information to be specified: --atccol. Default: "%(default)s"') 
     parser.add_argument('-i', required=False, default='', help='This file should adds based on a mapping using the supplied \"IID\" column information about Gender/Sex (needed), Brithdate (needed) ... e.g., information from stamdata file. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN protocol)')
     parser.add_argument('-j', required=False, default='', help='Optional IID-level metadata file, or multiple comma-separated files. Files are merged horizontally by --iidcol; the first nonmissing value wins for overlapping columns. Default: "%(default)s"')
@@ -8976,7 +9233,7 @@ if __name__ == '__main__':
     parser.add_argument('--recnum2',required=False, default='', help='Columname of the recnum field in -f files. Default: "%(default)s" (or \'recnum\' on NCRR)')
     parser.add_argument('--f2col',required=False, default='c_adiag', help='Columname of first diagnosis date. e.g. \'d_uddto\' or \'date_out\'. Default: "%(default)s"')
     parser.add_argument('--ExDepExc', action='store_true' , help='List of diagnostic codes to exclude (e.g. Cases holding also these codes will be excluded). This is currently precoded and will be changed to allowing to specify a file with codes.') 
-    parser.add_argument('--eM', action='store_true', help='Exact Match. If the ICD or diagnosis code should max exactly and not e.g. searching for ICD:F33 and receiving ICD:F331, ICD:F33, ICD:F339 and so on.')
+    parser.add_argument('--eM', action='store_true', help='Match codes without * exactly. Explicit * wildcards remain active anywhere in a code; a trailing * matches prefixes.')
     parser.add_argument('--noLeadingICD', action='store_true', help='Set this, if your diagnostic codes in \"-g\" do have a leading ICD*:, but your \"-f\" does not. This will only take affect together with --ExDepExc.')
     parser.add_argument('--ICDCM', action='store_true', help='Set this, if your Cohort is based on ICD10/9-CM codes and not base WHO. This will only take affect together with --ExDepExc.')
     parser.add_argument('--ICD8', action='store_true', help='Set this, if you only want to export ICD8 codes. This will only take affect together with --ExDepExc.')
@@ -9044,27 +9301,31 @@ if __name__ == '__main__':
     parser.add_argument('--verbose', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
+    supplied_options = {token.split('=', 1)[0] for token in sys.argv[1:] if token.startswith('--')}
+    explicit_opr_flags = {action.dest for action in parser._actions
+                          if any(option.startswith('--opr') and option in supplied_options
+                                 for option in action.option_strings)}
 
     argstring = ""
     default_argstring = ""
     #for arg, value in vars(args).items():
     #    default_value = parser.get_default(arg)  # Get the default value
     for action in parser._actions:
-        if action.dest == 'help':  # Skip the help argument
+        if not hasattr(args, action.dest):  # Skip informational actions such as help/version
             continue
         value = getattr(args, action.dest)  # Get the current value
         default_value = action.default  # Get the default value    
-        if value != default_value:
+        if value != default_value or action.dest in explicit_opr_flags:
             arg_name = action.option_strings[0]  # Use the first option string (e.g., --arg1)
             argstring = argstring+(f"{arg_name}: {value} (default: {default_value})\n")
     default_args = []
     for action in parser._actions:
-        if action.dest == 'help':  # Skip the help argument
+        if not hasattr(args, action.dest):  # Skip informational actions such as help/version
             continue
         value = getattr(args, action.dest)  # Get the current value
         default_value = action.default  # Get the default value    
         
-        if value == default_value:
+        if value == default_value and action.dest not in explicit_opr_flags:
             default_args.append(action.option_strings[0])
             default_argstring = default_argstring+(f"{action.option_strings[0]}: {value} (default: {default_value})\n")
 
@@ -9098,7 +9359,11 @@ if __name__ == '__main__':
          ipsych_options, args.deathdatecol, args.MinMaxAgeDeath, args.keepAlive, args.onlyDead,
          args.write_omop_cohort, args.omopPersonMap, args.omopPersonMapIidCol,
          args.omopPersonIdCol, args.omopCohortDefinitions, args.omopOutputDir,
-         args.omopsep, register_col=args.registercol)
+         args.omopsep, register_col=args.registercol,
+         opr_options={"file": args.opr, "code_col": args.oprcol, "date_col": args.oprdatecol,
+                      "date_out_col": args.oprdateoutcol,
+                      "iid_col": args.opriidcol, "sep": args.oprsep, "date_cols": args.oprDates,
+                      "include": args.oprFilter, "exclude": args.oprExclude})
 
 # If wantig to start it locally in python and run through it step by step
 '''

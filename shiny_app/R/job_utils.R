@@ -47,6 +47,9 @@ read_project_registry <- function(path) {
     "FreezePattern", "DiagnosisFile", "DiagnosisFiles", "DiagnosticColumns",
     "IidColumns", "DateInColumns", "DateOutColumns", "DiagnosisTypeColumns",
     "RecordNumberColumns", "RegisterColumns", "DeathDateColumn", "StandardAdditionalFiles",
+    "OprFiles", "OprColumns", "OprDateColumns", "OprIidColumns", "OprSeparator", "OprDates",
+    "OprDateInColumns", "OprDateOutColumns",
+    "OprFilters", "OprExclusions",
     "OptionalAdditionalFiles", "GeneralExclusionsTemplate", "QcedTemplate"
   )
   for (field in optional) {
@@ -195,12 +198,21 @@ resolve_protocol_files <- function(record, freeze_path = "", selected_additional
     date_out_columns = trim_value(record$DateOutColumns),
     diagnosis_type_columns = trim_value(record$DiagnosisTypeColumns),
     register_columns = trim_value(record$RegisterColumns),
+    opr = expand_all(split_config_paths(record$OprFiles)),
+    opr_columns = trim_value(record$OprColumns),
+    opr_date_columns = trim_value(record$OprDateInColumns %||% record$OprDateColumns),
+    opr_date_out_columns = trim_value(record$OprDateOutColumns),
+    opr_iid_columns = trim_value(record$OprIidColumns),
+    opr_separator = trim_value(record$OprSeparator),
+    opr_dates = trim_value(record$OprDates),
+    opr_filters = trim_value(record$OprFilters),
+    opr_exclusions = trim_value(record$OprExclusions),
     record_number_columns = trim_value(record$RecordNumberColumns),
     death_date_column = trim_value(record$DeathDateColumn)
   )
   configured <- c(files$stam, files$diagnosis, files$additional, files$general_exclusions, files$qced)
   configured <- configured[nzchar(configured)]
-  if (any(grepl(",", configured, fixed = TRUE))) stop("Configured input paths must not contain commas")
+  if (any(grepl(",", c(configured, files$opr), fixed = TRUE))) stop("Configured input paths must not contain commas")
   unavailable <- configured[!file.exists(configured) | file.access(configured, 4L) != 0L]
   if (length(unavailable)) {
     stop("Configured input file is unavailable or unreadable: ", unavailable[[1]])
@@ -368,6 +380,15 @@ build_getpheno_command <- function(record, run_id, phenotype_file, output_file,
     add_value("--DiagTypecol", protocol_files$diagnosis_type_columns %||% ""),
     add_value("--registercol", protocol_files$register_columns %||% ""),
     add_value("--recnum", protocol_files$record_number_columns %||% ""),
+    add_value("--opr", paste(protocol_files$opr %||% character(), collapse = ",")),
+    add_value("--oprcol", protocol_files$opr_columns %||% ""),
+    add_value("--oprdatecol", protocol_files$opr_date_columns %||% ""),
+    add_value("--oprdateoutcol", protocol_files$opr_date_out_columns %||% ""),
+    add_value("--opriidcol", protocol_files$opr_iid_columns %||% ""),
+    add_value("--oprsep", protocol_files$opr_separator %||% ""),
+    add_value("--oprDates", protocol_files$opr_dates %||% ""),
+    add_value("--oprFilter", protocol_files$opr_filters %||% ""),
+    add_value("--oprExclude", protocol_files$opr_exclusions %||% ""),
     add_value("--deathdatecol", death_date_column),
     add_value("--selectIIDs", iid_subset),
     add_flag("--iPSYCHComparison", options$ipsych),
@@ -528,13 +549,13 @@ query_job_state <- function(run_dir) {
   local_status <- ""
   if (file.exists(status_file)) {
     local_status <- trim_value(readLines(status_file, n = 1L, warn = FALSE))
-    if (local_status %in% c("RUNNING", "COMPLETED", "FAILED", "SUBMISSION_FAILED")) {
+    if (local_status %in% c("COMPLETED", "FAILED", "SUBMISSION_FAILED")) {
       return(local_status)
     }
   }
   metadata <- read_run_metadata(file.path(run_dir, "metadata.tsv"))
   job_id <- trim_value(metadata$job_id)
-  if (!grepl("^[0-9]+$", job_id)) return("SUBMISSION_UNKNOWN")
+  if (!grepl("^[0-9]+$", job_id)) return(if (nzchar(local_status)) local_status else "SUBMISSION_UNKNOWN")
   squeue <- Sys.which("squeue")
   if (nzchar(squeue)) {
     state <- tryCatch(

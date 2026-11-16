@@ -57,6 +57,15 @@ writeLines(c(
   "DateOutColumns: date_out",
   "DiagnosisTypeColumns: diagnosis_type,",
   "RegisterColumns: origin,registry",
+  paste("OprFiles:", file.path(project_root, "conditionally-used-opr.tsv")),
+  "OprColumns: procedure",
+  "OprDateColumns: performed",
+  "OprDateInColumns: started",
+  "OprDateOutColumns: ended",
+  "OprIidColumns: person",
+  "OprSeparator: \\t",
+  "OprFilters: procedure_source=PSY*,LPR;kind=A",
+  "OprExclusions: status=cancelled*",
   "DeathDateColumn: D_DODSDATO",
   paste("StandardAdditionalFiles:", standard_info),
   paste0("OptionalAdditionalFiles: Laboratory=", optional_info),
@@ -127,6 +136,14 @@ command <- build_getpheno_command(
   iid_subset = iid_subset
 )
 stopifnot("--iPSYCHComparison" %in% command$args)
+stopifnot(command$args[match("--opr", command$args) + 1L] == file.path(project_root, "conditionally-used-opr.tsv"))
+stopifnot(command$args[match("--oprcol", command$args) + 1L] == "procedure")
+stopifnot(command$args[match("--oprdatecol", command$args) + 1L] == "started")
+stopifnot(command$args[match("--oprdateoutcol", command$args) + 1L] == "ended")
+stopifnot(command$args[match("--opriidcol", command$args) + 1L] == "person")
+stopifnot(command$args[match("--oprsep", command$args) + 1L] == "\\t")
+stopifnot(command$args[match("--oprFilter", command$args) + 1L] == "procedure_source=PSY*,LPR;kind=A")
+stopifnot(command$args[match("--oprExclude", command$args) + 1L] == "status=cancelled*")
 stopifnot(command$args[match("--registercol", command$args) + 1L] == "origin,registry")
 stopifnot("--write_fastGWA_format" %in% command$args)
 stopifnot("--write_Plink2_format" %in% command$args)
@@ -162,6 +179,32 @@ metadata_path <- file.path(run_dir, "metadata.tsv")
 write_run_metadata(metadata_path, list(run_id = run_id, job_id = "12345"))
 metadata <- read_run_metadata(metadata_path)
 stopifnot(metadata$run_id == run_id, metadata$job_id == "12345")
+
+fake_bin <- file.path(temporary, "scheduler")
+dir.create(fake_bin)
+for (name in c("squeue", "sacct")) {
+  variable <- if (name == "squeue") "GETPHENO_TEST_QUEUE_STATE" else "GETPHENO_TEST_ACCOUNTING_STATE"
+  path <- file.path(fake_bin, name)
+  writeLines(c("#!/bin/sh", paste0("printf '%s\\n' \"$", variable, "\"")), path)
+  Sys.chmod(path, "0700")
+}
+old_path <- Sys.getenv("PATH")
+Sys.setenv(PATH = paste(fake_bin, old_path, sep = .Platform$path.sep))
+writeLines("RUNNING", file.path(run_dir, "status.txt"))
+Sys.setenv(GETPHENO_TEST_QUEUE_STATE = "")
+for (state in c("CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "COMPLETED")) {
+  Sys.setenv(GETPHENO_TEST_ACCOUNTING_STATE = paste0(state, "|"))
+  stopifnot(query_job_state(run_dir) == state)
+}
+Sys.setenv(GETPHENO_TEST_QUEUE_STATE = "RUNNING")
+stopifnot(query_job_state(run_dir) == "RUNNING")
+Sys.setenv(GETPHENO_TEST_QUEUE_STATE = "", GETPHENO_TEST_ACCOUNTING_STATE = "")
+stopifnot(query_job_state(run_dir) == "RUNNING")
+writeLines("COMPLETED", file.path(run_dir, "status.txt"))
+Sys.setenv(GETPHENO_TEST_ACCOUNTING_STATE = "CANCELLED")
+stopifnot(query_job_state(run_dir) == "COMPLETED")
+Sys.setenv(PATH = old_path)
+Sys.unsetenv(c("GETPHENO_TEST_QUEUE_STATE", "GETPHENO_TEST_ACCOUNTING_STATE"))
 
 found <- find_run_directory(registry, "tester", run_id)
 stopifnot(identical(found, normalizePath(run_dir)))

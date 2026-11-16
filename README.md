@@ -3,6 +3,8 @@
 # GetPheno
 [Build Phenotypes](#1-build-phenotypes)
 
+Run `python get_pheno.py --version` to print the installed script version and exit; no input or output arguments are required.
+
 An optional low-dependency R Shiny interface can submit GetPheno runs to Slurm and retrieve results using a unique run code. It supports permission-aware project/protocol selection, newest-first cohort freezes, protocol-defined additional files, and clearly separated optional run settings. See [shiny_app/README.md](shiny_app/README.md).
 
 A Docker image containing GetPheno, Python, R, the Shiny app, and Slurm client tools is provided in `Dockerfile`. Pushes to `main` publish `ghcr.io/mischalundberg/getpheno:edge`; release tags such as `V1.30` publish both the matching version tag and `latest`. Production deployments should pin a release tag. The per-user cluster deployment is documented under [Docker deployment](shiny_app/README.md#docker-deployment).
@@ -12,7 +14,7 @@ A Docker image containing GetPheno, Python, R, the Shiny app, and Slurm client t
 - Builds one or multiple phenotypes in one run from ICD8, ICD9, ICD10, ICD9-CM, ICD10-CM, and ATC code requests.
 - Supports tab-separated multi-phenotype request files with one phenotype name per row and comma-separated codes per phenotype.
 - Supports advanced phenotype definitions with `main=`, `sub=`, `rule_out=`, code ranges, and explicit wildcard codes.
-- Diagnostic requests may always include trailing `*`. By default, all requested codes are matched as prefixes; with `--eM`, only codes ending in `*` remain prefix matches and all other codes are exact. You do not need to include the `--eM` flag for `*` to pick up prefix matches.
+- Diagnostic requests may include `*` anywhere in a code. Codes without `*` match prefixes by default and exactly with `--eM`; wildcard patterns remain active in either mode. A trailing `*` continues to request prefix matching with or without `--eM`.
 - Supports lifetime, one-year-prior, and post-onset exclusion files, including ATC-based exclusions.
 - Supports IID subsets and optional death-date, age-at-death, living-person, and deceased-only filters.
 - Supports `--lowmem` and `--verylowmem` batching with fixed output columns across batches, so appended TSV output keeps a stable schema.
@@ -88,11 +90,21 @@ A Simple run would look like
 Keep in mind that there may be crucial flags to set, for example `--eM`.
 The script will (if not told differently) update the ICD codes from i.e. F32.0 to ICD10:DF320 automatically on CHB/DBDS and IBP clusters.
 
-Without `--eM`, all code requests are prefix matches. Operationally, this is equivalent to adding a trailing `*` to every requested code after ICD/ATC normalization, even if the user did not write `*`. `F25*,F33*,F32.2` is therefore interpreted as `F25*`, `F33*`, and `F32.2*`: it matches codes starting with `F25`, codes starting with `F33`, and codes starting with `F32.2`. For example, `ICD8:296.2` also matches subcodes such as `ICD8:296.29` after normalization.
+Without `--eM`, codes without an explicit `*` are prefix matches after normalization. Explicit wildcard patterns match the whole normalized code. `F25*,F33*,F32.2` is therefore interpreted as `F25*`, `F33*`, and `F32.2*`: it matches codes starting with `F25`, codes starting with `F33`, and codes starting with `F32.2`. For example, `ICD8:296.2` also matches subcodes such as `ICD8:296.29` after normalization. Matching is case-insensitive.
 
-With `--eM`, codes without trailing `*` are exact matches, while codes with trailing `*` stay prefix matches. `F25*,F33*,F32.2` is interpreted as `F25*`, `F33*`, and exact `F32.2`: it matches codes starting with `F25`, codes starting with `F33`, and only the exact code `F32.2`.
+With `--eM`, codes without `*` are exact matches; explicit wildcard patterns remain active. `F25*,F33*,F32.2` is interpreted as `F25*`, `F33*`, and exact `F32.2`: it matches codes starting with `F25`, codes starting with `F33`, and only the exact code `F32.2`.
+
+An explicit `*` anywhere in a code matches zero or more characters, with the entire normalized code evaluated against that pattern. For example, `ICD8:297.*9` matches `ICD8:297.29` and `ICD8:297.89`, but excludes `ICD8:297.291`. A trailing `*`, as in `ICD8:297.*9*`, also allows characters after the final `9`. Dots and other punctuation are literal; `?` and character classes are not wildcard syntax. These rules apply with and without `--eM`, to plain-text and HDF5 inputs. Existing ICD-prefix and decimal-point normalization options also apply to wildcard patterns.
 
 Ranges are expanded first and then matched using the same rules. For example, `ICD10:T36-ICD10:T38` becomes `ICD10:T36,ICD10:T37,ICD10:T38`. Without `--eM`, these expanded codes are prefix matches, so `ICD10:T360` would also match `ICD10:T36`. With `--eM`, the expanded codes are exact unless you explicitly write wildcard requests such as `ICD10:T36*,ICD10:T37*,ICD10:T38*`.
+
+To include subcodes under `--eM`, use a wildcard category range: `F20*-F29*` expands to `F20*,F21*,...,F29*`, including `F20.1` and `F29.8`. Explicit coding-system prefixes are supported, for example `ICD10:F20*-ICD10:F29*`. A wildcard on either endpoint is carried to every expanded category. Plain `F20-F29` remains exact under `--eM`.
+
+Leading zeros are preserved: `F00*-F02*` expands to `F00*,F01*,F02*`. CM namespaces such as `ICD10-CM:F20*-F29*` are supported. Endpoints with different explicit namespaces remain unexpanded.
+
+Ranges with the same decimal suffix preserve it: `ICD8:300.39-305.39` expands to `ICD8:300.39,ICD8:301.39,ICD8:302.39,ICD8:303.39,ICD8:304.39,ICD8:305.39`. With `--eM`, these are exact matches. Use `ICD8:300.39*-305.39*` to include longer subcodes.
+
+Within one category, decimal ranges advance at the precision shown: `ICD8:298.29-298.99` expands to `ICD8:298.29,ICD8:298.30,...,ICD8:298.99`. Use `--eM` for exact matches or add endpoint wildcards to include longer subcodes. `ICD8:303.*9` is a different pattern: it selects codes beginning with `303.` and ending in `9`, including `303.29` and `303.99` but excluding `303.291`, in either matching mode. Ranges that change both category and decimal suffix, or use different decimal precisions at their endpoints, remain unexpanded.
 
 We also support a `get_pheno.ini` file. This allows running with the same base settings every time. `get_pheno.py` will use the `get_pheno.ini` in (1) the current working directory or (2) the directory where `get_pheno.py` is located. Manually set flags supersede settings in `get_pheno.ini`.
 
@@ -124,6 +136,34 @@ This rule applies to `--fcol`, `--iidcol`, `--din`, `--don`, `--DiagTypecol`, an
 ```
 
 These files are merged horizontally by IID rather than appended as rows. All IID columns are read as strings before pandas type inference, preserving encrypted or numeric-looking identifiers exactly. The first file determines row and column priority: new columns from later files are appended, while later values only fill missing values in overlapping columns. Duplicate IIDs within an individual metadata file retain their first row. GetPheno logs the number of unique and overlapping IIDs for each additional file and warns if a later file has no overlap with preceding `-j` files.
+
+### Optional OPR procedure inputs
+
+Requests containing `OPR:` can use a separate procedure file, for example `SURGERY` followed by a tab and `OPR:KJKA*`. Add `--opr procedures.tsv --oprcol procedure --oprdateincol performed --opriidcol person --oprsep '\t'` to the normal command. Multiple comma-separated files are supported; code, date, and IID columns accept a shared name or one name per file.
+
+| CLI flag | INI key | Meaning/default |
+| --- | --- | --- |
+| `--opr` | `opr_file` | Procedure file(s); blank searches standard `-f`/`-f2` inputs |
+| `--oprcol` | `opr_diag_col` | Procedure-code column; default `opr` |
+| `--oprdateincol` | `opr_date_in_col` | Required in-date column; blank inherits `--din` |
+| `--oprdateoutcol` | `opr_date_out_col` | Optional out-date column; blank inherits `--don` when available, otherwise uses the in date |
+| `--opriidcol` | `opr_iid_col` | Procedure IID column; blank uses the resolved `--iidcol` |
+| `--oprsep` | `opr_sep` | Separator; blank uses `--fsep` |
+| `--oprDates` | `opr_cols_to_read_as_date` | Additional comma-separated date columns to parse |
+| `--oprFilter` | `opr_filters` | Include OPR rows matching explicit `COLUMN=PATTERN[,PATTERN]` rules; blank applies no filters |
+| `--oprExclude` | `opr_exclusions` | Exclude OPR rows matching explicit column/value rules; blank excludes nothing |
+
+OPR files are opened only when a main definition, compound rule, exclusion, or covariate requests `OPR:`. Without a separate file, matching uses the standard diagnosis inputs, including secondary diagnoses and indexed inputs. When a separate file is configured, it supplies the requested procedure evidence instead of matching the same OPR codes in the standard inputs. A configured file that is needed must exist and contain the mapped columns; unused OPR inputs are not checked or loaded.
+
+Procedure codes may include or omit `OPR:` in the inputs; requests retain the namespace so explicitly ICD- or ATC-labelled records cannot be mistaken for procedures. Exact matching, internal/trailing wildcards, and ranges use the shared code matcher. CSV/TSV and Stata procedure inputs are streamed and restricted to eligible IIDs in each batch; leading-zero string IIDs are preserved. `--BuildIndex` covers diagnosis/ATC sources; separate OPR inputs are streamed directly.
+
+Select an interval with `opr_date_in_col = date_in` and `opr_date_out_col = date_out` (CLI: `--oprdateincol date_in --oprdateoutcol date_out`). Only the in-date column is required. Unset OPR date settings inherit the resolved LPR in/out column names; an absent inherited out-date column or a missing out-date value uses the in date. An explicitly selected out-date column must exist. CLI selections override the corresponding INI settings. Commas map names to separate OPR files: `opr_date_in_col = start_one,start_two` selects the in-date column in each file; use `opr_date_out_col` for their optional out-date columns.
+
+Keep `OPR:` in phenotype requests to select procedure matching. Source codes may be stored as either `OPR:KAAA001` or `KAAA001`; both match `OPR:KAAA001` in text and indexed inputs without a cohort-specific prefix flag. Source files do not need to be rewritten. Dedicated OPR files use the `OPR:` namespace internally; final evidence codes from standard-input fallback can retain their original spelling.
+
+**OPR filtering is off by default, in both input routes.** Diagnosis-source flags (`--PSYK`, `--LPR`) and diagnosis-type inclusion/exclusion settings do not filter requested OPR evidence. No register, type column, or accepted/excluded values are preset for OPR. Cohort eligibility, QC, general IID exclusions and explicitly selected comparison date windows still apply. Procedures can provide main or supporting evidence in compound rules without assigning an artificial diagnosis type.
+
+To restrict procedures, explicitly name each column and the values to match, for example `--oprFilter 'procedure_source=PSY*,LPR' --oprFilter 'kind=A,B' --oprExclude 'status=cancelled*'`. These are illustrative values, not defaults. Repeat the flags for multiple columns; semicolon-separated rules also work in a single flag or INI setting. Alternatives within one rule are OR; inclusion rules are AND; any exclusion match removes the row. Values match case-insensitively and exactly unless they contain `*`; other punctuation is literal. Missing values do not match; a missing selected column is an error. Dedicated files use their source column names (shared across files); fallback can also resolve selected columns through the configured standard-input mappings, such as a renamed diagnosis-type column. Only OPR rows are affected. CLI rules override the corresponding INI rules.
 
 ### iPSYCH-comparison cohort mode
 
@@ -192,7 +232,7 @@ Cohort and custom-definition date defaults can be changed with `--iPSYCHBirthSta
 
 ### Options (Flags):
 ```
-usage: get_pheno.py [-h] [--ini INI] [-g G] -o O [-f F] [--f2 F2] [--atc ATC] [-i I] [-j J] [--ge GE] [--qced QCED] [--name NAME] [--fcol FCOL] [--gcol GCOL] [--iidcol IIDCOL] [--bdcol BDCOL] [--sexcol SEXCOL] [--atccol ATCCOL] [--atcdatecol ATCDATECOL] [--fsep FSEP] [--gsep GSEP] [--ophsep OPHSEP] [--din DIN] [--don DON] [--recnum RECNUM] [--recnum2 RECNUM2] [--f2col F2COL] [--ExDepExc] [--eM]
+usage: get_pheno.py [-h] [--ini INI] [-g G] -o O [-f F] [--f2 F2] [--atc ATC] [--opr OPR] [--oprcol OPRCOL] [--oprdatecol OPRDATECOL] [--opriidcol OPRIIDCOL] [--oprsep OPRSEP] [--oprDates OPRDATES] [-i I] [-j J] [--ge GE] [--qced QCED] [--name NAME] [--fcol FCOL] [--gcol GCOL] [--iidcol IIDCOL] [--bdcol BDCOL] [--sexcol SEXCOL] [--atccol ATCCOL] [--atcdatecol ATCDATECOL] [--fsep FSEP] [--gsep GSEP] [--ophsep OPHSEP] [--din DIN] [--don DON] [--recnum RECNUM] [--recnum2 RECNUM2] [--f2col F2COL] [--ExDepExc] [--eM]
                                 [--noLeadingICD] [--ICDCM] [--ICD8] [--ICD9] [--ICD10] [--iidstatus IIDSTATUS] [--iidstatusdate IIDSTATUSDATE] [--DiagTypeExclusions DIAGTYPEEXCLUSIONS] [--DiagTypeInclusions DIAGTYPEINCLUSIONS] [--LifetimeExclusion LIFETIMEEXCLUSION] [--PostExclusion POSTEXCLUSION] [--OneyPriorExclusion ONEYPRIOREXCLUSION] [--fDates FDATES] [--iDates IDATES] [--atcDates ATCDATES] [--DateFormat DATEFORMAT] [--MinMaxAge MINMAXAGE] [--Fyob FYOB]
                                 [--iPSYCHComparison] [--iPSYCHBirthStart IPSYCHBIRTHSTART] [--iPSYCHBirthEnd IPSYCHBIRTHEND] [--iPSYCHDxStart IPSYCHDXSTART] [--iPSYCHDxEnd IPSYCHDXEND] [--iPSYCHDKParentsCol IPSYCHDKPARENTSCOL] [--iPSYCHBirthplaceCol IPSYCHBIRTHPLACECOL] [--iPSYCHMotherCol IPSYCHMOTHERCOL] [--iPSYCHKeepMultiples]
                                 [--Fgender FGENDER] [--eCc] [--removePointInDiagCode] [--skipICDUpdate] [--MatchFI] [--BuildEntryExitDates] [--Ophold OPHOLD] [--BuildOphold] [--RegisterRun] [--lpp] [--write_pickle] [--write_fastGWA_format] [--write_Plink2_format] [--BuildTestSet] [--testRun] [--nthreads NTHREADS] [--lowmem] [--verylowmem] [--batchsize BATCHSIZE] [--registercol REGISTERCOL] [--PSYK] [--LPR] [--BuildIndex] [--IndexDtypes INDEXDTYPES] [--verbose]
@@ -207,6 +247,20 @@ optional arguments:
   -f F                  Diagnosis file. Should have at least "IID", "date_in", "date_out", and "diagnosis" as columns. Names can be defined using --iidcol, --din, --don, and --fcol. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN protocol)
   --f2 F2               Secondary diagnosis file. This is meant to be used if you have files with secondary diagnosis information as i.e. in Denmark. Here we would usually use the 'recnum' to merge these entries with '-f'. These files also contain less information as the '-f' files. Should have at least "recnum", and "diagnosis" as columns. Names can be defined using --recnum2 and --f2col. The recnum column in the
                         '-f' files can be specified using --recnum. Default: ""
+  --opr OPR             Procedure input file(s); loaded only for OPR: requests, otherwise search standard inputs.
+  --oprcol OPRCOL       Procedure-code column, shared or one per file; default: opr.
+  --oprdateincol OPRDATECOL, --oprdatecol OPRDATECOL
+                        Required procedure in-date column; blank inherits --din.
+  --oprdateoutcol OPRDATEOUTCOL
+                        Optional out-date column; inherits --don when present, otherwise uses the in date.
+  --opriidcol OPRIIDCOL
+                        Procedure IID column; blank uses --iidcol.
+  --oprsep OPRSEP       Procedure separator; blank uses --fsep.
+  --oprDates OPRDATES   Additional procedure date columns to parse.
+  --oprFilter COLUMN=PATTERNS
+                        Include OPR rows matching explicit column/value rules; repeat as needed. Default: none.
+  --oprExclude COLUMN=PATTERNS
+                        Exclude OPR rows matching explicit column/value rules; repeat as needed. Default: none.
   --atc ATC             PRescription information file. Will be handeld simillar to -f but needs additional information to be specified: --atccol. Default: ""
   -i I                  This file should adds based on a mapping using the supplied "IID" column information about Gender/Sex (needed), Brithdate (needed) ... e.g., information from stamdata file. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN protocol)
   -j J                  This file should have additional "IID" information e.g. date of entry to cohort. This is not needed and can also be skipped. No default. Will be automatically determined if not entered for GenomeDK and CHB/DBDS (DEGEN protocol)
@@ -230,7 +284,7 @@ optional arguments:
   --recnum2 RECNUM2     Columname of the recnum field in -f files. Default: "" (or 'recnum' on NCRR)
   --f2col F2COL         Columname of first diagnosis date. e.g. 'd_uddto' or 'date_out'. Default: "c_adiag" (or 'date_out' in CHB/DBDS)
   --ExDepExc            List of diagnostic codes to exclude (e.g. Cases holding also these codes will be excluded). This is currently precoded and will be changed to allowing to specify a file with codes.
-  --eM                  Exact Match. Codes without trailing * must match exactly. Codes with trailing * remain prefix matches.
+  --eM                  Exact Match. Codes without * must match exactly. Patterns containing * remain active; trailing * matches prefixes.
   --noLeadingICD        Set this, if your diagnostic codes in "-g" do have a leading ICD*:, but your "-f" does not. This will only take affect together with --ExDepExc.
   --ICDCM               Set this, if your Cohort is based on ICD10/9-CM codes and not base WHO. This will only take affect together with --ExDepExc.
   --ICD8                Restrict phenotype export to ICD8 codes.

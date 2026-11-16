@@ -2,6 +2,12 @@
 misc/
 .vscode/
 .continue/
+.codex/
+.pytest_cache/
 __pycache__/
 shiny_app/projects.conf
+shiny_app/projects.conf.example
 .env.docker
+graphify-out/
+Agents.md
+MANUSCRIPT_DRAFT.md

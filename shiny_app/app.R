@@ -121,7 +121,7 @@ ui <- navbarPage(
                 "Paste or upload tab-separated definitions, one phenotype per line.",
                 "Example: MDD [tab] ICD10:F32,ICD10:F33.",
                 "Advanced example: MDD [tab] main=ICD10:F32,ICD10:F33;rule_out=ICD10:F25.",
-                "Use sub= for supporting codes. A trailing * always requests prefix matching.",
+                "Use sub= for supporting codes. * matches zero or more characters anywhere; a trailing * requests prefix matching.",
                 "Leave blank with iPSYCH comparison selected to use all eight presets."
               ),
               required = FALSE
@@ -151,7 +151,7 @@ ui <- navbarPage(
             checkboxInput(
               "exact_match", help_label(
                 "Exact matching (--eM)",
-                "When selected, codes without * match exactly and codes ending in * remain prefix matches. Without it, all codes are prefix matches."
+                "When selected, codes without * match exactly; otherwise they match prefixes. Explicit * patterns remain active in either mode, including ICD8:297.*9."
               ), FALSE
             ),
             radioButtons(

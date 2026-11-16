@@ -219,3 +219,9 @@ Rscript shiny_app/tests/test_shiny_server.R
 They validate registry parsing, project access, phenotype counting, safe command construction, Slurm-script execution, job-ID parsing, metadata, submission, and run retrieval. The server test skips cleanly when Shiny is not installed.
 
 With iPSYCH comparison selected, leave phenotype definitions blank to use all eight presets; supplied definitions retain their existing behavior. Configure `RegisterColumns` in the project registry or `registercol` in its INI file.
+
+Optional procedure files can be configured as `OprFiles` (paths separated by `|`), `OprColumns`, `OprDateColumns`, `OprIidColumns`, `OprSeparator`, and `OprDates`. The launcher forwards these as `--opr`, `--oprcol`, `--oprdatecol`, `--opriidcol`, `--oprsep`, and `--oprDates`; required procedure-file validation happens in GetPheno only when `OPR:` codes are requested. The INI equivalents may be used instead.
+
+Use `OprDateInColumns` (preferred over legacy `OprDateColumns`) and optional `OprDateOutColumns` for separate in/out dates. The latter forwards `--oprdateoutcol`. Blank OPR date settings inherit LPR date columns; only the in-date column is required, and missing inherited out dates use the in date.
+
+OPR source/type filtering is disabled by default in both dedicated files and standard-input fallback. Explicit `OprFilters` and `OprExclusions` settings forward `--oprFilter` and `--oprExclude` column/value rules (semicolon-separated for multiple rules); the corresponding INI keys are `opr_filters` and `opr_exclusions`. No OPR column or filter values are preset. Diagnosis-only PSYK/LPR and type filters do not restrict OPR evidence; global cohort/QC/date restrictions still apply.
